@@ -62,10 +62,17 @@ impl OutboxEnv {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ── Tracing ───────────────────────────────────────────────────────────────
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .with(tracing_subscriber::fmt::layer().json())
-        .init();
+    // LOG_FORMAT=json   → structured JSON (default in Docker / production)
+    // LOG_FORMAT=pretty  → human-readable coloured output (local dev)
+    // LOG_FORMAT=compact → human-readable, no colours (CI / plain terminals)
+    let log_format = std::env::var("LOG_FORMAT").unwrap_or_else(|_| "json".into());
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let registry = tracing_subscriber::registry().with(filter);
+    match log_format.to_lowercase().as_str() {
+        "pretty"  => registry.with(tracing_subscriber::fmt::layer().pretty()).init(),
+        "compact" => registry.with(tracing_subscriber::fmt::layer().compact()).init(),
+        _         => registry.with(tracing_subscriber::fmt::layer().json()).init(),
+    }
 
     // ── Config ────────────────────────────────────────────────────────────────
     let env = OutboxEnv::load().context("Failed to load outbox worker config")?;

@@ -80,7 +80,7 @@ services:
       context: .
       dockerfile: Dockerfile.migrate
     image: ns-migrate:latest
-    restart: "no"          # run once and exit — do NOT restart on success
+    restart: "no" # run once and exit — do NOT restart on success
     depends_on:
       postgres:
         condition: service_healthy
@@ -152,6 +152,7 @@ services:
       NS__AMQP__URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
       NS__MAILER__PASSWORD: ${SMTP_PASS:-}
       RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: compact
     ports:
       - "${SERVICE_PORT:-8080}:8080"
       - "${METRICS_PORT:-9091}:9091"
