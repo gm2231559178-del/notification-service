@@ -1,0 +1,22 @@
+# Dockerfile.migrate
+#
+# Lightweight container that runs sqlx migrations for both databases and exits.
+# Uses the official sqlx-cli image — no Rust build needed.
+FROM rust:1.94-slim-bookworm 
+
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN cargo install sqlx-cli
+
+# Copy both migration sets
+COPY migrations/notification_db /migrations/notification_db
+COPY migrations/business_db     /migrations/business_db
+
+# Copy and make the runner script executable
+COPY deploy/migrate.sh /migrate.sh
+RUN chmod +x /migrate.sh
+
+ENTRYPOINT ["/migrate.sh"]

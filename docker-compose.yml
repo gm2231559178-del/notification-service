@@ -5,8 +5,6 @@ networks:
   backend:
     driver: bridge
   business:
-    # Isolated network: only outbox-worker and business-postgres sit here.
-    # notification-service has NO interface on this network.
     driver: bridge
   observability:
     driver: bridge
@@ -47,8 +45,6 @@ services:
       start_period: 15s
 
   # ── PostgreSQL (business service DB) ─────────────────────────────────────
-  # Only accessible from the 'business' network.
-  # notification-service is NOT on that network — it cannot reach this DB.
   business-postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -61,7 +57,7 @@ services:
     volumes:
       - business_pg_data:/var/lib/postgresql/data
     networks:
-      - business        # ← only on 'business' network
+      - business
     healthcheck:
       test:
         [
@@ -72,6 +68,32 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+  # ── Migration runner ──────────────────────────────────────────────────────
+  # Runs once, applies all pending migrations to both DBs, then exits (code 0).
+  # notification-service and outbox-worker both wait for this to complete
+  # before starting, so the schema is always ready before any app code runs.
+  #
+  # Re-running `docker compose up` is safe — sqlx skips already-applied migrations.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrate
+    image: ns-migrate:latest
+    restart: "no"          # run once and exit — do NOT restart on success
+    depends_on:
+      postgres:
+        condition: service_healthy
+      business-postgres:
+        condition: service_healthy
+    environment:
+      NOTIFICATION_DATABASE_URL: >-
+        postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notifications}
+      BUSINESS_DATABASE_URL: >-
+        postgres://${BUSINESS_POSTGRES_USER:-postgres}:${BUSINESS_POSTGRES_PASSWORD:-postgres}@business-postgres:5432/${BUSINESS_POSTGRES_DB:-business}
+    networks:
+      - backend
+      - business
 
   # ── RabbitMQ ─────────────────────────────────────────────────────────────
   rabbitmq:
@@ -87,7 +109,7 @@ services:
       - rabbitmq_data:/var/lib/rabbitmq
     networks:
       - backend
-      - business        # both workers share the same broker
+      - business
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 15s
@@ -96,8 +118,6 @@ services:
       start_period: 30s
 
   # ── Mailpit — local SMTP catch-all (dev only) ─────────────────────────────
-  # Started with: docker compose --profile dev up
-  # Web UI at http://localhost:8025
   mailpit:
     image: axllent/mailpit:latest
     restart: unless-stopped
@@ -110,8 +130,8 @@ services:
       - dev
 
   # ── Notification service ──────────────────────────────────────────────────
-  # Connects to: its own postgres, rabbitmq.
-  # Cannot reach: business-postgres (not on 'business' network).
+  # Waits for migrate to finish — schema is guaranteed ready on first query.
+  # No longer calls sqlx::migrate!() itself; that's the runner's job.
   notification-service:
     build:
       context: .
@@ -120,8 +140,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 35s
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
     volumes:
@@ -131,15 +151,13 @@ services:
         postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notifications}
       NS__AMQP__URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
       NS__MAILER__PASSWORD: ${SMTP_PASS:-}
-      # NS__HTTP__API_KEY: ${API_KEY}
       RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "${SERVICE_PORT:-8080}:8080"
       - "${METRICS_PORT:-9091}:9091"
     networks:
-      - backend         # ← NOT on 'business' network
+      - backend
       - observability
-
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/ready || exit 1"]
       interval: 15s
@@ -148,8 +166,7 @@ services:
       start_period: 20s
 
   # ── Outbox worker ─────────────────────────────────────────────────────────
-  # Connects to: business-postgres (read/write outbox table), rabbitmq.
-  # Cannot reach: notification-service's postgres (not on 'backend' network).
+  # Also waits for migrate — business DB schema must exist before polling.
   outbox-worker:
     build:
       context: .
@@ -158,8 +175,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 35s
     depends_on:
-      business-postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       rabbitmq:
         condition: service_healthy
     environment:
@@ -172,10 +189,9 @@ services:
       NS_OUTBOX__BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
       RUST_LOG: ${RUST_LOG:-info}
     networks:
-      - business        # ← NOT on 'backend' network
+      - business
 
   # ── Prometheus ────────────────────────────────────────────────────────────
-  # Started with: docker compose --profile observability up
   prometheus:
     image: prom/prometheus:v2.52.0
     restart: unless-stopped
