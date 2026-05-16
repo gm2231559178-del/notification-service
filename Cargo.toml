@@ -44,6 +44,15 @@ name = "notification-service"
 version = "0.1.0"
 edition = "2021"
 
+# ── Binaries ──────────────────────────────────────────────────────────────────
+[[bin]]
+name = "notification-service"
+path = "src/main.rs"
+
+[[bin]]
+name = "outbox-worker"
+path = "src/outbox_worker.rs"
+
 [dependencies]
 common           = { path = "crates/common" }
 store            = { path = "crates/store" }

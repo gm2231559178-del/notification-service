@@ -10,7 +10,7 @@ use mailer::smtp::SmtpConfig;
 use mailer::webhook::WebhookConfig;
 use mailer::{EmailSender, SenderRegistry, SmtpSender, WebhookSender};
 use metrics_exporter_prometheus::PrometheusBuilder;
-use outbox::{run_outbox_worker, OutboxConfig};
+
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
 use sqlx::postgres::PgPoolOptions;
@@ -203,27 +203,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // ── Outbox worker ─────────────────────────────────────────────────────────
-    let outbox_task = if let Some(outbox_db_url) = cfg.outbox_database_url {
-        let outbox_cfg = OutboxConfig {
-            database_url: outbox_db_url,
-            amqp_url: cfg.amqp.url.clone(),
-            exchange: cfg.amqp.exchange.clone(),
-            routing_key: cfg.amqp.routing_key.clone(),
-            poll_interval_ms: cfg.amqp.outbox_poll_interval_ms.unwrap_or(1_000),
-            batch_size: cfg.amqp.outbox_batch_size.unwrap_or(50),
-        };
-        let outbox_shutdown = shutdown.clone();
-        info!("Starting outbox worker");
-        Some(tokio::spawn(async move {
-            if let Err(e) = run_outbox_worker(outbox_cfg, outbox_shutdown).await {
-                tracing::error!(error = %e, "Outbox worker exited with error");
-            }
-        }))
-    } else {
-        info!("No OUTBOX_DATABASE_URL set — outbox worker disabled");
-        None
-    };
 
     info!("Notification service running");
 
@@ -252,9 +231,7 @@ async fn main() -> anyhow::Result<()> {
     if tokio::time::timeout(timeout, async {
         let _ = api_task.await;
         let _ = consumer_task.await;
-        if let Some(t) = outbox_task {
-            let _ = t.await;
-        }
+
     })
     .await
     .is_err()

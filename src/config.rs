@@ -6,8 +6,6 @@ use std::collections::HashMap;
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub database: DatabaseConfig,
-    /// Optional: URL of the business service DB to poll for outbox rows.
-    pub outbox_database_url: Option<String>,
     pub amqp: AmqpConfig,
     pub mailer: MailerConfig,
     pub http: HttpConfig,
@@ -97,10 +95,6 @@ pub struct AmqpConfig {
     /// Maximum consecutive rate-limit backoff cycles per recipient (default: 5).
     #[serde(default = "default_max_rl_waits")]
     pub max_rl_waits: u32,
-    /// Outbox poll interval in ms (default: 1000). Only used when outbox worker is enabled.
-    pub outbox_poll_interval_ms: Option<u64>,
-    /// Outbox batch size (default: 50). Only used when outbox worker is enabled.
-    pub outbox_batch_size: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

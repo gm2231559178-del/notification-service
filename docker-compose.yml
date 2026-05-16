@@ -4,6 +4,10 @@ version: "3.9"
 networks:
   backend:
     driver: bridge
+  business:
+    # Isolated network: only outbox-worker and business-postgres sit here.
+    # notification-service has NO interface on this network.
+    driver: bridge
   observability:
     driver: bridge
 
@@ -42,9 +46,9 @@ services:
       retries: 5
       start_period: 15s
 
-  # ── PostgreSQL (business service DB — outbox worker source) ───────────────
-  # Only started with: docker compose --profile outbox up
-  # In production this would be your business service's own database.
+  # ── PostgreSQL (business service DB) ─────────────────────────────────────
+  # Only accessible from the 'business' network.
+  # notification-service is NOT on that network — it cannot reach this DB.
   business-postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -57,7 +61,7 @@ services:
     volumes:
       - business_pg_data:/var/lib/postgresql/data
     networks:
-      - backend
+      - business        # ← only on 'business' network
     healthcheck:
       test:
         [
@@ -68,8 +72,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
-    profiles:
-      - outbox
 
   # ── RabbitMQ ─────────────────────────────────────────────────────────────
   rabbitmq:
@@ -85,6 +87,7 @@ services:
       - rabbitmq_data:/var/lib/rabbitmq
     networks:
       - backend
+      - business        # both workers share the same broker
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 15s
@@ -107,14 +110,14 @@ services:
       - dev
 
   # ── Notification service ──────────────────────────────────────────────────
+  # Connects to: its own postgres, rabbitmq.
+  # Cannot reach: business-postgres (not on 'business' network).
   notification-service:
     build:
       context: .
       dockerfile: Dockerfile
     image: notification-service:latest
     restart: unless-stopped
-    # Must exceed the 30 s drain timeout in main.rs so in-flight messages
-    # finish before the process is killed.
     stop_grace_period: 35s
     depends_on:
       postgres:
@@ -122,48 +125,54 @@ services:
       rabbitmq:
         condition: service_healthy
     volumes:
-      # Typed config: ports (u16), arrays (Vec<String>), and structured settings
-      # live here as proper TOML — the config crate reads them without any
-      # string-to-type coercion. Only secrets stay as env vars below.
       - ./config/local.toml:/app/config/local.toml:ro
     environment:
-      # ── Secrets / connection URLs ────────────────────────────────────────────
-      # These are the only values that genuinely vary per deployment or must
-      # stay out of the config file. Everything else is in config/local.toml.
-
-      # Database URL (credentials may differ per environment)
       NS__DATABASE__URL: >-
         postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notifications}
-
-      # RabbitMQ URL (credentials may differ per environment)
       NS__AMQP__URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
-
-      # Outbox worker: leave blank to disable.
-      # With the 'outbox' profile active, set to:
-      #   OUTBOX_DATABASE_URL=postgres://postgres:postgres@business-postgres:5432/business
-      NS__OUTBOX_DATABASE_URL: ${OUTBOX_DATABASE_URL:-}
-
-      # SMTP password — keep as env var / Docker secret, never in the config file.
       NS__MAILER__PASSWORD: ${SMTP_PASS:-}
-
-      # Optional bearer token for all /emails/* endpoints.
       # NS__HTTP__API_KEY: ${API_KEY}
-
-      # ── Logging ─────────────────────────────────────────────────────────────
       RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "${SERVICE_PORT:-8080}:8080"
-      # Prometheus metrics — bind to localhost only in production.
       - "${METRICS_PORT:-9091}:9091"
     networks:
-      - backend
+      - backend         # ← NOT on 'business' network
       - observability
+
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/ready || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ── Outbox worker ─────────────────────────────────────────────────────────
+  # Connects to: business-postgres (read/write outbox table), rabbitmq.
+  # Cannot reach: notification-service's postgres (not on 'backend' network).
+  outbox-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.outbox
+    image: outbox-worker:latest
+    restart: unless-stopped
+    stop_grace_period: 35s
+    depends_on:
+      business-postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      NS_OUTBOX__DATABASE_URL: >-
+        postgres://${BUSINESS_POSTGRES_USER:-postgres}:${BUSINESS_POSTGRES_PASSWORD:-postgres}@business-postgres:5432/${BUSINESS_POSTGRES_DB:-business}
+      NS_OUTBOX__AMQP_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
+      NS_OUTBOX__EXCHANGE: ${AMQP_EXCHANGE:-notifications}
+      NS_OUTBOX__ROUTING_KEY: ${AMQP_ROUTING_KEY:-email.requested}
+      NS_OUTBOX__POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
+      NS_OUTBOX__BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
+      RUST_LOG: ${RUST_LOG:-info}
+    networks:
+      - business        # ← NOT on 'backend' network
 
   # ── Prometheus ────────────────────────────────────────────────────────────
   # Started with: docker compose --profile observability up
