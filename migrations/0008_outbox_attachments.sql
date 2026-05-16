@@ -1,0 +1,71 @@
+-- migrations/0008_outbox_attachments.sql
+--
+-- No schema change required — attachments are stored inside the existing
+-- JSONB `payload` column of the outbox table in the BUSINESS SERVICE database.
+--
+-- This migration documents the updated URL-based attachment contract and adds
+-- a partial index for monitoring events that carry attachments.
+--
+-- ── Interface contract for business systems ───────────────────────────────────
+--
+-- Business systems specify attachments as URL references only.
+-- The notification service fetches the file at send time.
+-- No base64 encoding or file embedding is required.
+--
+--   {
+--     "event_id":   "uuid",
+--     "timestamp":  "2024-01-01T00:00:00Z",
+--     "type":       "ORDER_CONFIRMATION",
+--     "recipients": [{ "email": "user@example.com", "name": "Alice" }],
+--     "payload":    { "orderId": "1234", "amount": "99.00" },
+--
+--     "attachments": [
+--       {
+--         -- REQUIRED: URL the notification service will HTTP GET at send time.
+--         -- Supported origins:
+--         --   • Object storage (S3/GCS/Blob): use a pre-signed URL valid ≥ 5 min.
+--         --   • Runtime-generated files: expose GET /internal/attachments/{id}.
+--         --   • Files in DB/filesystem: serve via an internal HTTP endpoint.
+--         "url": "https://storage.example.com/invoices/inv-1234.pdf?token=xyz",
+--
+--         -- REQUIRED: filename shown to the email recipient.
+--         -- Must not contain path separators (/ or \).
+--         "filename": "invoice-1234.pdf",
+--
+--         -- REQUIRED: MIME type used verbatim as the MIME part Content-Type.
+--         "content_type": "application/pdf",
+--
+--         -- OPTIONAL: Bearer token sent as Authorization: Bearer <token>.
+--         -- For internal service-to-service auth. Omit for public/signed URLs.
+--         "fetch_token": "eyJhb...",
+--
+--         -- OPTIONAL: seconds after `timestamp` the URL remains valid.
+--         -- When the notification service attempts a fetch after this window,
+--         -- the delivery is permanently FAILED (no retry) rather than wasting
+--         -- retry slots on an already-expired URL.
+--         "max_age_secs": 300
+--       }
+--     ]
+--   }
+--
+-- ── Retry and security notes ──────────────────────────────────────────────────
+--
+-- The URL may be fetched more than once (once per delivery attempt).
+-- For pre-signed URLs set expiry ≥ (max_retries × retry_base_ms × 2^max_retries).
+-- With defaults (3 retries, 500 ms base): allow at least 4 minutes.
+--
+-- HTTP response classification by the notification service:
+--   2xx → success, bytes attached to email
+--   429 → rate-limited by file server, retried with long backoff
+--   4xx → permanent failure (expired, forbidden, not found) — no retry
+--   5xx → transient, retried normally
+--   network error → transient, retried normally
+--   response > 10 MB → permanent failure — no retry
+--   max_age_secs elapsed → permanent failure — no retry
+--
+-- ── Partial index ─────────────────────────────────────────────────────────────
+
+CREATE INDEX IF NOT EXISTS outbox_has_attachments_idx
+    ON outbox ((jsonb_array_length(payload -> 'attachments')))
+    WHERE payload ? 'attachments'
+      AND jsonb_array_length(payload -> 'attachments') > 0;
