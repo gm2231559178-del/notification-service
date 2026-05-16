@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE email_log SET status='BLOCKED', last_error=$3, updated_at=now() WHERE event_id=$1 AND recipient_email=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7ef2090e2a3e345ee5f5e9f801863b24db06f6d5002c11fce86ba08132e03d45"
+}

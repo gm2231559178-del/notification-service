@@ -1,6 +1,7 @@
 use rate_limiter::RateLimitConfig;
 use recipient_filter::FilterConfig;
 use serde::Deserialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
@@ -20,15 +21,50 @@ pub struct AppConfig {
     #[serde(default)]
     pub filter: FilterConfig,
     /// How long resolved templates are cached in memory (seconds).
-    /// Set to 0 to disable caching and always hit the database.
-    /// Default: 300 (5 minutes).
     #[serde(default = "default_template_cache_ttl_secs")]
     pub template_cache_ttl_secs: u64,
     /// Maximum size of a single fetched email attachment in bytes.
-    /// Attachments larger than this are permanently rejected (no retry).
-    /// Default: 10 MiB (10 * 1024 * 1024).
     #[serde(default = "default_max_attachment_bytes")]
     pub max_attachment_bytes: usize,
+    /// Named SMTP sender accounts for multi-tenant / multi-brand deployments.
+    ///
+    /// Each entry gives a business system its own SMTP credentials and From
+    /// address. The publisher selects an account by setting `sender_account`
+    /// in the `EmailEvent`. When the field is absent or the name is not found,
+    /// the service falls back to the global `[mailer]` config.
+    ///
+    /// config/default.toml example:
+    /// ```toml
+    /// [sender_accounts.system_a]
+    /// host       = "smtp.gmail.com"
+    /// port       = 587
+    /// username   = "A@example.com"
+    /// password   = "app-password-a"
+    /// from_email = "A@example.com"
+    /// from_name  = "System A"
+    ///
+    /// [sender_accounts.system_b]
+    /// host       = "smtp.sendgrid.net"
+    /// port       = 587
+    /// username   = "apikey"
+    /// password   = "SG.xxxx"
+    /// from_email = "B@example.com"
+    /// from_name  = "System B"
+    /// ```
+    #[serde(default)]
+    pub sender_accounts: HashMap<String, SmtpAccountConfig>,
+}
+
+/// SMTP credentials for a named sender account.
+/// All fields are required — there is no partial fallback to the global mailer.
+#[derive(Debug, Deserialize, Clone)]
+pub struct SmtpAccountConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub from_email: String,
+    pub from_name: String,
 }
 
 fn default_max_rl_waits() -> u32 {
@@ -59,7 +95,6 @@ pub struct AmqpConfig {
     /// Cap on concurrent in-flight message handlers (default: 10).
     pub max_concurrency: usize,
     /// Maximum consecutive rate-limit backoff cycles per recipient (default: 5).
-    /// See `ConsumerConfig::max_rl_waits` for the full explanation.
     #[serde(default = "default_max_rl_waits")]
     pub max_rl_waits: u32,
     /// Outbox poll interval in ms (default: 1000). Only used when outbox worker is enabled.
@@ -73,7 +108,7 @@ pub struct HttpConfig {
     pub port: u16,
     /// When set, all `/emails/*` endpoints require `Authorization: Bearer <api_key>`.
     /// Leave unset only when the API is isolated behind a private network.
-    /// Override via `NS__HTTP__API_KEY` environment variable.
+    /// Override via `NS_HTTP__API_KEY` environment variable.
     pub api_key: Option<String>,
 }
 
@@ -153,6 +188,20 @@ impl AppConfig {
                 if !url.starts_with("http://") && !url.starts_with("https://") {
                     bail!("mailer.url must start with http:// or https://");
                 }
+            }
+        }
+
+        // Validate every named sender account at startup so a typo in the
+        // config fails fast rather than causing a runtime panic later.
+        for (name, acct) in &self.sender_accounts {
+            if acct.host.is_empty() {
+                bail!("sender_accounts.{name}.host must not be empty");
+            }
+            if acct.username.is_empty() {
+                bail!("sender_accounts.{name}.username must not be empty");
+            }
+            if acct.from_email.is_empty() {
+                bail!("sender_accounts.{name}.from_email must not be empty");
             }
         }
 

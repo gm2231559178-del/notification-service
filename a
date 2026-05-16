@@ -1,0 +1,18 @@
+python3 - << 'PY'
+content = open("./crates/api/src/routes.rs").read()
+
+replacements = [
+    ("/emails/:event_id\"",                            "/emails/{event_id}\""),
+    ("/emails/:event_id/retry\"",                      "/emails/{event_id}/retry\""),
+    ("/emails/:event_id/recipients/:email\"",          "/emails/{event_id}/recipients/{email}\""),
+    ("/emails/:event_id/recipients/:email/retry\"",    "/emails/{event_id}/recipients/{email}/retry\""),
+    ("/templates/:event_type/cache\"",                 "/templates/{event_type}/cache\""),
+]
+
+for old, new in replacements:
+    assert old in content, f"Pattern not found: {old}"
+    content = content.replace(old, new, 1)
+
+open("./crates/api/src/routes.rs", "w").write(content)
+print("OK")
+PY

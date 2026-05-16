@@ -27,21 +27,21 @@ pub fn build_router(state: ApiState) -> Router {
     // `api_key` is configured. When `api_key` is `None` (network-isolated
     // deployments), the middleware passes every request through.
     let protected = Router::new()
-        .route("/emails/:event_id", get(get_email_status))
-        .route("/emails/:event_id/retry", post(retry_event))
+        .route("/emails/{event_id}", get(get_email_status))
+        .route("/emails/{event_id}/retry", post(retry_event))
         .route(
-            "/emails/:event_id/recipients/:email",
+            "/emails/{event_id}/recipients/{email}",
             get(get_recipient_status),
         )
         .route(
-            "/emails/:event_id/recipients/:email/retry",
+            "/emails/{event_id}/recipients/{email}/retry",
             post(retry_recipient),
         )
         // Template cache invalidation — useful after editing email_template rows
         // without restarting the service.
         .route("/templates/cache", delete(invalidate_all_template_cache))
         .route(
-            "/templates/:event_type/cache",
+            "/templates/{event_type}/cache",
             delete(invalidate_template_cache),
         )
         .layer(middleware::from_fn_with_state(state.clone(), bearer_auth));

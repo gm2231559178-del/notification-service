@@ -3,7 +3,7 @@ use std::sync::Arc;
 use common::{is_valid_email, AppError, EmailEvent, FromOverride, Recipient};
 use mailer::message::ResolvedAttachment;
 use mailer::smtp::is_permanent_smtp_error;
-use mailer::{render_html_template, render_template, EmailMessage, EmailSender};
+use mailer::{render_html_template, render_template, EmailMessage, EmailSender, SenderRegistry};
 use metrics::{counter, histogram};
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
@@ -11,15 +11,17 @@ use store::{EmailLogStore, TemplateStore};
 use tracing::{info, instrument, warn};
 
 /// Shared, cheaply-cloneable context passed to every per-recipient processor call.
-///
-/// Groups the infrastructure dependencies that were previously threaded as
-/// individual arguments through `process_recipient` and its callers.
-/// All fields are either `Clone` or wrapped in `Arc` so cloning is cheap.
 #[derive(Clone)]
 pub struct ProcessorContext {
     pub store: EmailLogStore,
     pub template_store: TemplateStore,
+    /// Global default sender (SMTP or webhook) used when no named account matches.
     pub sender: Arc<dyn EmailSender>,
+    /// Registry of named per-business-system SMTP accounts.
+    /// When an event carries `sender_account`, the matching entry is used
+    /// instead of `sender`. Falls back to `sender` when the name is absent
+    /// or not found.
+    pub sender_registry: SenderRegistry,
     pub filter: RecipientFilter,
     pub rate_limiter: MailRateLimiter,
 }
@@ -165,8 +167,15 @@ pub async fn process_recipient(
     ctx.rate_limiter.wait_for_token().await;
 
     // ── 7. Send ───────────────────────────────────────────────────────────────
+    // Resolve the sender: named account from the registry takes priority;
+    // fall back to the global default when absent or unrecognised.
+    let sender = ctx
+        .sender_registry
+        .resolve(event.sender_account.as_deref())
+        .unwrap_or_else(|| Arc::clone(&ctx.sender));
+
     let send_start = std::time::Instant::now();
-    match ctx.sender.send(&msg).await {
+    match sender.send(&msg).await {
         Ok(()) => {
             let elapsed = send_start.elapsed().as_secs_f64();
             let _ = ctx.store.mark_sent(event.event_id, &recipient.email).await;

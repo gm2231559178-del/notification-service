@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT retry_count FROM email_log WHERE event_id=$1 AND recipient_email=$2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "retry_count",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "90ee86143283d703537dc4415b1f46ca172aa0462d89ff8cef4edbab4b31cece"
+}

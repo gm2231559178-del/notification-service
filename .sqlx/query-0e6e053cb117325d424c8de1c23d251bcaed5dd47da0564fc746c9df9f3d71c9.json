@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE email_log\n               SET    status='PENDING', retry_count=0, last_error=NULL, updated_at=now()\n               WHERE  event_id=$1 AND status='FAILED'\n               RETURNING recipient_email",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "recipient_email",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0e6e053cb117325d424c8de1c23d251bcaed5dd47da0564fc746c9df9f3d71c9"
+}

@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT subject, body_html, body_text\n            FROM   email_template\n            WHERE  type = $1 AND active = TRUE\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "subject",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "body_html",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "body_text",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "59daebe6f3ef522babe8e8dfb5e3447275294b2d8ec1cfd114644956ee242172"
+}

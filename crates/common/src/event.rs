@@ -85,6 +85,23 @@ pub struct EmailEvent {
     /// but does not need to correspond to a registered template.
     #[serde(default)]
     pub body_override: Option<BodyOverride>,
+
+    /// Named sender account to use for SMTP authentication and the From address.
+    ///
+    /// Must match a key under `[sender_accounts]` in the service config.
+    /// When absent (or the name is not configured), the service falls back to
+    /// the global `[mailer]` settings.
+    ///
+    /// Use this when multiple business systems share one notification service
+    /// but each must send from its own authenticated SMTP account:
+    ///
+    /// ```json
+    /// { "sender_account": "system_a", ... }   // → A@example.com via system A creds
+    /// { "sender_account": "system_b", ... }   // → B@example.com via system B creds
+    /// { ... }                                  // → global mailer default
+    /// ```
+    #[serde(default)]
+    pub sender_account: Option<String>,
 }
 
 // ── Body override ─────────────────────────────────────────────────────────────

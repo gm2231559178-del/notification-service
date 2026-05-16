@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE outbox SET status = 'IN_PROGRESS' WHERE id = ANY($1) AND status = 'PENDING'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "36c84dd88757a47208f3313e9e84f697e2393d1fa62dc5a991c9ad57a3bd614b"
+}

@@ -84,3 +84,33 @@ from_name  = "Example App"
 # backend    = "webhook"
 # url        = "https://hooks.example.com/email"
 # auth_token = "bearer-token"
+
+# ── Named sender accounts (optional) ─────────────────────────────────────────
+# Allows multiple business systems to send from their own SMTP accounts,
+# each with independent credentials and From address.
+#
+# The publisher sets "sender_account": "<name>" in the EmailEvent to select
+# an account. When the field is absent or the name is not found here, the
+# service falls back to the global [mailer] config above.
+#
+# Example — two business systems sharing this notification service:
+#
+# [sender_accounts.system_a]
+# host       = "smtp.gmail.com"
+# port       = 587
+# username   = "A@example.com"
+# password   = "app-password-a"     # Gmail App Password (not login password)
+# from_email = "A@example.com"
+# from_name  = "System A"
+#
+# [sender_accounts.system_b]
+# host       = "smtp.sendgrid.net"
+# port       = 587
+# username   = "apikey"             # SendGrid: literal "apikey"
+# password   = "SG.xxxxxxxxxxxx"    # SendGrid API key with Mail Send scope
+# from_email = "B@example.com"
+# from_name  = "System B"
+#
+# Publisher payload:
+#   { "sender_account": "system_a", "type": "ORDER_CONFIRMATION", ... }
+#   → authenticated as A@example.com, From: System A <A@example.com>

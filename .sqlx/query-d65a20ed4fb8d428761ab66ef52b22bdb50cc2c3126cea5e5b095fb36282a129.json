@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE email_log\n               SET retry_count=retry_count+1, total_attempts=total_attempts+1,\n                   last_error=$3, status=$4, updated_at=now()\n               WHERE event_id=$1 AND recipient_email=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d65a20ed4fb8d428761ab66ef52b22bdb50cc2c3126cea5e5b095fb36282a129"
+}

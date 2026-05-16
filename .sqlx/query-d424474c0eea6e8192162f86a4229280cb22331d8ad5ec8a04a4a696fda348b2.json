@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE email_log SET status='SENT', updated_at=now() WHERE event_id=$1 AND recipient_email=$2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d424474c0eea6e8192162f86a4229280cb22331d8ad5ec8a04a4a696fda348b2"
+}

@@ -5,7 +5,7 @@ use common::{AppError, EmailEvent, Recipient};
 use futures_lite::StreamExt;
 use lapin::{options::*, types::FieldTable, Channel, Connection, ConnectionProperties};
 use mailer::message::ResolvedAttachment;
-use mailer::{fetch_attachments_with_limit, EmailSender};
+use mailer::{fetch_attachments_with_limit, EmailSender, SenderRegistry};
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
 use reqwest::Client;
@@ -27,6 +27,7 @@ pub async fn run_consumer(
     store: EmailLogStore,
     template_store: TemplateStore,
     sender: Arc<dyn EmailSender>,
+    sender_registry: SenderRegistry,
     filter: RecipientFilter,
     rate_limiter: MailRateLimiter,
     shutdown: CancellationToken,
@@ -44,6 +45,7 @@ pub async fn run_consumer(
         store,
         template_store,
         sender,
+        sender_registry,
         filter,
         rate_limiter,
     };

@@ -104,6 +104,7 @@ pub async fn run(args: SendArgs, cfg: CliConfig) -> Result<()> {
         },
         attachments,
         body_override,
+        sender_account: None,
     };
 
     // ── 7. Confirm ────────────────────────────────────────────────────────────

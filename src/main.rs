@@ -8,7 +8,7 @@ use api::{build_router, ApiState, Publisher};
 use consumer::{run_consumer, ConsumerConfig};
 use mailer::smtp::SmtpConfig;
 use mailer::webhook::WebhookConfig;
-use mailer::{EmailSender, SmtpSender, WebhookSender};
+use mailer::{EmailSender, SenderRegistry, SmtpSender, WebhookSender};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use outbox::{run_outbox_worker, OutboxConfig};
 use rate_limiter::MailRateLimiter;
@@ -96,6 +96,25 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // ── Named sender accounts (multi-business-system SMTP) ──────────────────
+    // Each entry in sender_accounts gets its own SmtpSender instance so
+    // per-account credentials are never mixed. The global `sender` above is
+    // used when an event omits `sender_account` or names an unknown account.
+    let mut sender_registry = SenderRegistry::new();
+    for (name, acct) in &cfg.sender_accounts {
+        let acct_sender = SmtpSender::new(mailer::smtp::SmtpConfig {
+            host:       acct.host.clone(),
+            port:       acct.port,
+            username:   acct.username.clone(),
+            password:   acct.password.clone(),
+            from_email: acct.from_email.clone(),
+            from_name:  acct.from_name.clone(),
+        })
+        .with_context(|| format!("Failed to build SMTP sender for account '{name}'"))?;
+        sender_registry.register(name.clone(), Arc::new(acct_sender));
+        info!(account = name, from_email = acct.from_email, "Registered named sender account");
+    }
+
     // ── Rate limiter ──────────────────────────────────────────────────────────
     let rate_limiter = MailRateLimiter::new(cfg.rate_limit.clone());
     if rate_limiter.is_disabled() {
@@ -173,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
             store,
             template_store,
             sender,
+            sender_registry,
             filter,
             rate_limiter,
             consumer_shutdown,

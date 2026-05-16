@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, event_id, event_type, recipient_email, recipient_name, status, retry_count,\n                      total_attempts, last_error, payload, from_override, attachments, created_at, updated_at\n               FROM email_log WHERE event_id=$1 ORDER BY created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "event_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "event_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "recipient_email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "recipient_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "retry_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "total_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "last_error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "payload",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "from_override",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "attachments",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "fd64c6d533394cc1658d5df8ddac859ccd92cbee5fa8d5aa2dc640c366c5c42c"
+}

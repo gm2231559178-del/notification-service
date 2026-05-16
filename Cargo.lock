@@ -726,6 +726,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "common",
  "futures-lite 2.6.1",
  "lapin",
@@ -742,6 +743,7 @@ dependencies = [
  "tokio-retry",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
