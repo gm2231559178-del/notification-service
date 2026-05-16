@@ -20,6 +20,9 @@ pub struct OutboxConfig {
 
     /// Maximum rows to process per polling cycle.
     pub batch_size: i64,
+
+    /// Maximum number of connections in the outbox DB pool (default: 5).
+    pub pool_size: u32,
 }
 
 impl Default for OutboxConfig {
@@ -31,6 +34,7 @@ impl Default for OutboxConfig {
             routing_key: "email.requested".into(),
             poll_interval_ms: 1_000,
             batch_size: 50,
+            pool_size: 5,
         }
     }
 }

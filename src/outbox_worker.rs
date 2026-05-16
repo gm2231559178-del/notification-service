@@ -33,6 +33,9 @@ struct OutboxEnv {
     poll_interval_ms: u64,
     #[serde(default = "default_batch_size")]
     batch_size: i64,
+    /// Max connections in the outbox DB pool (NS_OUTBOX__POOL_SIZE, default: 5).
+    #[serde(default = "default_pool_size")]
+    pool_size: u32,
 }
 
 fn default_exchange() -> String {
@@ -46,6 +49,9 @@ fn default_poll_interval_ms() -> u64 {
 }
 fn default_batch_size() -> i64 {
     50
+}
+fn default_pool_size() -> u32 {
+    5
 }
 
 impl OutboxEnv {
@@ -102,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         routing_key: env.routing_key,
         poll_interval_ms: env.poll_interval_ms,
         batch_size: env.batch_size,
+        pool_size: env.pool_size,
     };
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────

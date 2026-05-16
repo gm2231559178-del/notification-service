@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Database ──────────────────────────────────────────────────────────────
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(cfg.database.pool_size)
         .connect(&cfg.database.url)
         .await
         .context("Failed to connect to PostgreSQL")?;

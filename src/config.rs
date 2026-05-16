@@ -80,6 +80,15 @@ fn default_max_attachment_bytes() -> usize {
 #[derive(Debug, Deserialize, Clone)]
 pub struct DatabaseConfig {
     pub url: String,
+    /// Maximum number of connections in the PostgreSQL connection pool.
+    /// Default: 10. Tune based on your Postgres `max_connections` setting
+    /// and the number of notification-service replicas.
+    #[serde(default = "default_db_pool_size")]
+    pub pool_size: u32,
+}
+
+fn default_db_pool_size() -> u32 {
+    10
 }
 
 #[derive(Debug, Deserialize, Clone)]

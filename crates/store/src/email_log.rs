@@ -33,12 +33,13 @@ impl EmailLogStore {
         payload: &serde_json::Value,
         from_override: Option<&serde_json::Value>,
         attachments: Option<&serde_json::Value>,
+        sender_account: Option<&str>,
     ) -> Result<Uuid, AppError> {
         let row = sqlx::query!(
             r#"
             INSERT INTO email_log
-                (event_id, event_type, recipient_email, recipient_name, status, payload, from_override, attachments)
-            VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7)
+                (event_id, event_type, recipient_email, recipient_name, status, payload, from_override, attachments, sender_account)
+            VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7, $8)
             ON CONFLICT (event_id, recipient_email) DO NOTHING
             RETURNING id
             "#,
@@ -49,6 +50,7 @@ impl EmailLogStore {
             payload,
             from_override,
             attachments,
+            sender_account,
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -111,7 +113,7 @@ impl EmailLogStore {
     pub async fn get_by_event_id(&self, event_id: Uuid) -> Result<Vec<EmailLog>, AppError> {
         let rows = sqlx::query!(
             r#"SELECT id, event_id, event_type, recipient_email, recipient_name, status, retry_count,
-                      total_attempts, last_error, payload, from_override, attachments, created_at, updated_at
+                      total_attempts, last_error, payload, from_override, attachments, sender_account, created_at, updated_at
                FROM email_log WHERE event_id=$1 ORDER BY created_at"#,
             event_id,
         )
@@ -138,6 +140,7 @@ impl EmailLogStore {
                     payload: r.payload,
                     from_override: r.from_override,
                     attachments: r.attachments,
+                    sender_account: r.sender_account,
                     created_at: r.created_at,
                     updated_at: r.updated_at,
                 })
@@ -154,7 +157,7 @@ impl EmailLogStore {
     ) -> Result<EmailLog, AppError> {
         let r = sqlx::query!(
             r#"SELECT id, event_id, event_type, recipient_email, recipient_name, status, retry_count,
-                      total_attempts, last_error, payload, from_override, attachments, created_at, updated_at
+                      total_attempts, last_error, payload, from_override, attachments, sender_account, created_at, updated_at
                FROM email_log WHERE event_id=$1 AND recipient_email=$2"#,
             event_id,
             recipient_email,
@@ -176,6 +179,7 @@ impl EmailLogStore {
             payload: r.payload,
             from_override: r.from_override,
             attachments: r.attachments,
+            sender_account: r.sender_account,
             created_at: r.created_at,
             updated_at: r.updated_at,
         })

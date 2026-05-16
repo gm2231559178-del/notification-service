@@ -120,14 +120,21 @@ async fn republish_event(state: &ApiState, event_id: Uuid) -> Result<(), ApiErro
         })
         .collect();
 
+    // Recover the sender_account name used for the original delivery so the
+    // retry uses the same SMTP account and From address (fix: pre-0014 rows
+    // have NULL here, which causes the consumer to fall back to the global
+    // [mailer] default — acceptable for legacy rows).
+    let sender_account = logs.iter().find_map(|l| l.sender_account.clone());
+
     let envelope = json!({
-        "event_id":      event_id,
-        "timestamp":     original_timestamp.to_rfc3339(),
-        "type":          event_type,
-        "recipients":    recipients,
-        "payload":       template_payload,
-        "from_override": from_override,   // null when not stored (pre-0009 rows)
-        "attachments":   attachments,
+        "event_id":       event_id,
+        "timestamp":      original_timestamp.to_rfc3339(),
+        "type":           event_type,
+        "recipients":     recipients,
+        "payload":        template_payload,
+        "from_override":  from_override,   // null when not stored (pre-0009 rows)
+        "attachments":    attachments,
+        "sender_account": sender_account,  // null when not stored (pre-0014 rows)
     });
     let body =
         serde_json::to_vec(&envelope).map_err(|e| ApiError(AppError::Queue(e.to_string())))?;

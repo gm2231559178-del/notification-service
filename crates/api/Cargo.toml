@@ -20,3 +20,4 @@ tower       = "0.5"
 tower-http  = { version = "0.6", features = ["trace"] }
 sqlx        = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 lapin       = "2"
+subtle      = "2"

@@ -45,7 +45,7 @@ pub async fn run_outbox_worker(
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(cfg.pool_size)
         .connect(&cfg.database_url)
         .await
         .context("Outbox worker: failed to connect to business DB")?;

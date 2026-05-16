@@ -6,6 +6,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use subtle::ConstantTimeEq;
 use serde_json::json;
 use tower_http::trace::TraceLayer;
 
@@ -76,7 +77,9 @@ async fn bearer_auth(State(state): State<ApiState>, request: Request, next: Next
             Json(json!({ "error": "Authorization header missing or malformed" })),
         )
             .into_response(),
-        Some(t) if t != expected => (
+        // Constant-time comparison prevents timing attacks on the token.
+        // `ConstantTimeEq::ct_eq` returns `subtle::Choice` (1 = equal).
+        Some(t) if t.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 0 => (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "Invalid API key" })),
         )

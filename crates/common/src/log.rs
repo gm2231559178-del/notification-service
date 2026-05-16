@@ -78,6 +78,11 @@ pub struct EmailLog {
     /// URL-based attachment references stored for retry reconstruction.
     /// Nullable for rows written before migration 0009.
     pub attachments: Option<serde_json::Value>,
+    /// Named SMTP sender account used for the original delivery.
+    /// Stored so manual retries via the HTTP API send from the same account.
+    /// NULL means the global [mailer] default was used.
+    /// Nullable for rows written before migration 0014.
+    pub sender_account: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

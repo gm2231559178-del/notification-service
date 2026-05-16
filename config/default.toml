@@ -4,6 +4,7 @@
 
 [database]
 url = "postgres://postgres:postgres@localhost:5432/notifications"
+# pool_size = 10   # Max DB connections. Override via NS__DATABASE__POOL_SIZE.
 
 # Optional: set NS_OUTBOX_DATABASE_URL to enable the built-in outbox worker.
 # Leave unset if your business service publishes to RabbitMQ directly.

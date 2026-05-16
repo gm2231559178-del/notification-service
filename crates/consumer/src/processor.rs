@@ -106,6 +106,7 @@ pub async fn process_recipient(
             &event.payload,
             from_override_json.as_ref(),
             attachments_json.as_ref(),
+            event.sender_account.as_deref(),
         )
         .await
     {
