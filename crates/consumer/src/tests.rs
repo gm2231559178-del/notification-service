@@ -215,7 +215,10 @@ mod processor_tests {
             attempt += 1;
         }
 
-        assert!(stopped_early, "permanent error should stop without retrying");
+        assert!(
+            stopped_early,
+            "permanent error should stop without retrying"
+        );
         assert_eq!(attempt, 0, "no retry attempts should have been made");
     }
 
@@ -248,7 +251,10 @@ mod processor_tests {
 
         assert!(hit_rl_cap, "should have hit rate-limit cap");
         assert_eq!(rl_count, max_rl_waits + 1);
-        assert_eq!(attempt, 0, "rate-limit exhaustion must not consume retry slots");
+        assert_eq!(
+            attempt, 0,
+            "rate-limit exhaustion must not consume retry slots"
+        );
     }
 
     #[test]
@@ -284,10 +290,19 @@ mod processor_tests {
     #[test]
     fn email_status_try_from_known_values() {
         use common::EmailStatus;
-        assert_eq!(EmailStatus::try_from("PENDING").unwrap(), EmailStatus::Pending);
+        assert_eq!(
+            EmailStatus::try_from("PENDING").unwrap(),
+            EmailStatus::Pending
+        );
         assert_eq!(EmailStatus::try_from("SENT").unwrap(), EmailStatus::Sent);
-        assert_eq!(EmailStatus::try_from("FAILED").unwrap(), EmailStatus::Failed);
-        assert_eq!(EmailStatus::try_from("BLOCKED").unwrap(), EmailStatus::Blocked);
+        assert_eq!(
+            EmailStatus::try_from("FAILED").unwrap(),
+            EmailStatus::Failed
+        );
+        assert_eq!(
+            EmailStatus::try_from("BLOCKED").unwrap(),
+            EmailStatus::Blocked
+        );
     }
 
     #[test]

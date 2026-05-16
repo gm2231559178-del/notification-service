@@ -235,7 +235,8 @@ async fn process_one_recipient(
     shutdown: &CancellationToken,
 ) {
     // Seed attempt counter from DB so restarts don't reset the count.
-    let initial = ctx.store
+    let initial = ctx
+        .store
         .get_retry_count(event.event_id, &recipient.email)
         .await
         .unwrap_or(0) as u32;
@@ -256,7 +257,8 @@ async fn process_one_recipient(
                     error    = %e,
                     "Permanent failure for recipient — marking FAILED"
                 );
-                let _ = ctx.store
+                let _ = ctx
+                    .store
                     .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
                     .await;
                 return;
@@ -269,7 +271,8 @@ async fn process_one_recipient(
                     attempt,
                     "Max retries exhausted for recipient"
                 );
-                let _ = ctx.store
+                let _ = ctx
+                    .store
                     .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
                     .await;
                 return;
@@ -287,7 +290,8 @@ async fn process_one_recipient(
                         max_rl_waits = cfg.max_rl_waits,
                         "Rate-limit backoff limit reached — marking FAILED"
                     );
-                    let _ = ctx.store
+                    let _ = ctx
+                        .store
                         .mark_failed(event.event_id, &recipient.email, msg, true)
                         .await;
                     return;
@@ -300,7 +304,8 @@ async fn process_one_recipient(
                     delay_secs = delay.as_secs(),
                     "Rate-limited — backing off without consuming retry slot"
                 );
-                let _ = ctx.store
+                let _ = ctx
+                    .store
                     .mark_failed(event.event_id, &recipient.email, msg, false)
                     .await;
                 tokio::select! {
@@ -322,7 +327,8 @@ async fn process_one_recipient(
                     error    = %e,
                     "Transient failure — retrying"
                 );
-                let _ = ctx.store
+                let _ = ctx
+                    .store
                     .mark_failed(event.event_id, &recipient.email, &e.to_string(), false)
                     .await;
                 tokio::select! {

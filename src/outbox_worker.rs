@@ -35,18 +35,23 @@ struct OutboxEnv {
     batch_size: i64,
 }
 
-fn default_exchange() -> String { "notifications".into() }
-fn default_routing_key() -> String { "email.requested".into() }
-fn default_poll_interval_ms() -> u64 { 1_000 }
-fn default_batch_size() -> i64 { 50 }
+fn default_exchange() -> String {
+    "notifications".into()
+}
+fn default_routing_key() -> String {
+    "email.requested".into()
+}
+fn default_poll_interval_ms() -> u64 {
+    1_000
+}
+fn default_batch_size() -> i64 {
+    50
+}
 
 impl OutboxEnv {
     fn load() -> anyhow::Result<Self> {
         let cfg = config::Config::builder()
-            .add_source(
-                config::Environment::with_prefix("NS_OUTBOX")
-                    .separator("__"),
-            )
+            .add_source(config::Environment::with_prefix("NS_OUTBOX").separator("__"))
             .build()?;
         let env: Self = cfg.try_deserialize()?;
         if env.database_url.is_empty() {
@@ -69,9 +74,15 @@ async fn main() -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let registry = tracing_subscriber::registry().with(filter);
     match log_format.to_lowercase().as_str() {
-        "pretty"  => registry.with(tracing_subscriber::fmt::layer().pretty()).init(),
-        "compact" => registry.with(tracing_subscriber::fmt::layer().compact()).init(),
-        _         => registry.with(tracing_subscriber::fmt::layer().json()).init(),
+        "pretty" => registry
+            .with(tracing_subscriber::fmt::layer().pretty())
+            .init(),
+        "compact" => registry
+            .with(tracing_subscriber::fmt::layer().compact())
+            .init(),
+        _ => registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .init(),
     }
 
     // ── Config ────────────────────────────────────────────────────────────────
@@ -85,12 +96,12 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let cfg = OutboxConfig {
-        database_url:    env.database_url,
-        amqp_url:        env.amqp_url,
-        exchange:        env.exchange,
-        routing_key:     env.routing_key,
+        database_url: env.database_url,
+        amqp_url: env.amqp_url,
+        exchange: env.exchange,
+        routing_key: env.routing_key,
         poll_interval_ms: env.poll_interval_ms,
-        batch_size:      env.batch_size,
+        batch_size: env.batch_size,
     };
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────

@@ -96,7 +96,8 @@ pub async fn process_recipient(
         serde_json::to_value(&event.attachments).ok()
     };
 
-    match ctx.store
+    match ctx
+        .store
         .insert_pending(
             event.event_id,
             &event.event_type,
@@ -119,7 +120,8 @@ pub async fn process_recipient(
     // ── 4. Recipient filter ───────────────────────────────────────────────────
     if let Err(AppError::Blocked(reason)) = ctx.filter.check(&recipient.email) {
         warn!(reason = %reason, "Recipient blocked — dropping");
-        let _ = ctx.store
+        let _ = ctx
+            .store
             .mark_blocked(event.event_id, &recipient.email, &reason)
             .await;
         counter!("emails_blocked_total", "event_type" => event.event_type.clone()).increment(1);
@@ -143,7 +145,8 @@ pub async fn process_recipient(
         ) {
             (Ok(s), Ok(h), Ok(t)) => (s, h, t),
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-                let _ = ctx.store
+                let _ = ctx
+                    .store
                     .mark_failed(event.event_id, &recipient.email, &e.to_string(), true)
                     .await;
                 return RecipientOutcome::Failed(e);

@@ -31,9 +31,15 @@ async fn main() -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let registry = tracing_subscriber::registry().with(filter);
     match log_format.to_lowercase().as_str() {
-        "pretty"  => registry.with(tracing_subscriber::fmt::layer().pretty()).init(),
-        "compact" => registry.with(tracing_subscriber::fmt::layer().compact()).init(),
-        _         => registry.with(tracing_subscriber::fmt::layer().json()).init(),
+        "pretty" => registry
+            .with(tracing_subscriber::fmt::layer().pretty())
+            .init(),
+        "compact" => registry
+            .with(tracing_subscriber::fmt::layer().compact())
+            .init(),
+        _ => registry
+            .with(tracing_subscriber::fmt::layer().json())
+            .init(),
     }
 
     // ── Config ────────────────────────────────────────────────────────────────
@@ -110,16 +116,20 @@ async fn main() -> anyhow::Result<()> {
     let mut sender_registry = SenderRegistry::new();
     for (name, acct) in &cfg.sender_accounts {
         let acct_sender = SmtpSender::new(mailer::smtp::SmtpConfig {
-            host:       acct.host.clone(),
-            port:       acct.port,
-            username:   acct.username.clone(),
-            password:   acct.password.clone(),
+            host: acct.host.clone(),
+            port: acct.port,
+            username: acct.username.clone(),
+            password: acct.password.clone(),
             from_email: acct.from_email.clone(),
-            from_name:  acct.from_name.clone(),
+            from_name: acct.from_name.clone(),
         })
         .with_context(|| format!("Failed to build SMTP sender for account '{name}'"))?;
         sender_registry.register(name.clone(), Arc::new(acct_sender));
-        info!(account = name, from_email = acct.from_email, "Registered named sender account");
+        info!(
+            account = name,
+            from_email = acct.from_email,
+            "Registered named sender account"
+        );
     }
 
     // ── Rate limiter ──────────────────────────────────────────────────────────
@@ -210,7 +220,6 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-
     info!("Notification service running");
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────
@@ -238,7 +247,6 @@ async fn main() -> anyhow::Result<()> {
     if tokio::time::timeout(timeout, async {
         let _ = api_task.await;
         let _ = consumer_task.await;
-
     })
     .await
     .is_err()
