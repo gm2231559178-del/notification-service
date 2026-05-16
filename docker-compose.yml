@@ -121,59 +121,33 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    volumes:
+      # Typed config: ports (u16), arrays (Vec<String>), and structured settings
+      # live here as proper TOML — the config crate reads them without any
+      # string-to-type coercion. Only secrets stay as env vars below.
+      - ./config/local.toml:/app/config/local.toml:ro
     environment:
-      # ── Database ────────────────────────────────────────────────────────────
+      # ── Secrets / connection URLs ────────────────────────────────────────────
+      # These are the only values that genuinely vary per deployment or must
+      # stay out of the config file. Everything else is in config/local.toml.
+
+      # Database URL (credentials may differ per environment)
       NS__DATABASE__URL: >-
         postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-notifications}
 
-      # ── RabbitMQ ────────────────────────────────────────────────────────────
+      # RabbitMQ URL (credentials may differ per environment)
       NS__AMQP__URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
-      NS__AMQP__QUEUE: ${AMQP_QUEUE:-email.requested}
-      NS__AMQP__EXCHANGE: ${AMQP_EXCHANGE:-notifications}
-      NS__AMQP__ROUTING_KEY: ${AMQP_ROUTING_KEY:-email.requested}
-      NS__AMQP__MAX_RETRIES: ${AMQP_MAX_RETRIES:-3}
-      NS__AMQP__RETRY_BASE_MS: ${AMQP_RETRY_BASE_MS:-1000}
-      NS__AMQP__MAX_CONCURRENCY: ${AMQP_MAX_CONCURRENCY:-10}
-      NS__AMQP__OUTBOX_POLL_INTERVAL_MS: ${AMQP_OUTBOX_POLL_INTERVAL_MS:-1000}
-      NS__AMQP__OUTBOX_BATCH_SIZE: ${AMQP_OUTBOX_BATCH_SIZE:-50}
 
-      # ── Outbox worker ───────────────────────────────────────────────────────
-      # Leave blank to disable. Set to the business DB URL to enable.
-      # With the 'outbox' profile active, use:
-      #   NS__OUTBOX_DATABASE_URL=postgres://postgres:postgres@business-postgres:5432/business
+      # Outbox worker: leave blank to disable.
+      # With the 'outbox' profile active, set to:
+      #   OUTBOX_DATABASE_URL=postgres://postgres:postgres@business-postgres:5432/business
       NS__OUTBOX_DATABASE_URL: ${OUTBOX_DATABASE_URL:-}
 
-      # ── Rate limiting ───────────────────────────────────────────────────────
-      NS__RATE_LIMIT__EMAILS_PER_SECOND: ${RATE_LIMIT_EMAILS_PER_SECOND:-10}
-      NS__RATE_LIMIT__BURST_SIZE: ${RATE_LIMIT_BURST_SIZE:-20}
+      # SMTP password — keep as env var / Docker secret, never in the config file.
+      NS__MAILER__PASSWORD: ${SMTP_PASS:-}
 
-      # ── Recipient filter ────────────────────────────────────────────────────
-      # JSON arrays — leave at [] for passthrough (no filtering).
-      NS__FILTER__BLOCKED_EMAILS: ${FILTER_BLOCKED_EMAILS:-[]}
-      NS__FILTER__BLOCKED_DOMAINS: ${FILTER_BLOCKED_DOMAINS:-[]}
-      NS__FILTER__ALLOWED_EMAILS: ${FILTER_ALLOWED_EMAILS:-[]}
-      NS__FILTER__ALLOWED_DOMAINS: ${FILTER_ALLOWED_DOMAINS:-[]}
-
-      # ── HTTP ────────────────────────────────────────────────────────────────
-      NS__HTTP__PORT: "8080"
       # Optional bearer token for all /emails/* endpoints.
       # NS__HTTP__API_KEY: ${API_KEY}
-
-      # ── Metrics ─────────────────────────────────────────────────────────────
-      # Served on a separate port — never expose this publicly.
-      NS__METRICS_PORT: "${METRICS_PORT:-9091}"
-
-      # ── Mailer ──────────────────────────────────────────────────────────────
-      # MAILER_BACKEND: smtp (default) | webhook
-      # Dev default points at the mailpit container (start with --profile dev).
-      # Swap SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS for production.
-      NS__MAILER__BACKEND: ${MAILER_BACKEND:-smtp}
-      NS__MAILER__HOST: ${SMTP_HOST:-mailpit}
-      NS__MAILER__PORT: "${SMTP_PORT:-1025}"
-      NS__MAILER__USERNAME: ${SMTP_USER:-}
-      NS__MAILER__PASSWORD: ${SMTP_PASS:-}
-      NS__MAILER__FROM_EMAIL: ${SMTP_FROM:-no-reply@example.com}
-      NS__MAILER__FROM_NAME: ${SMTP_FROM_NAME:-Notification Service}
 
       # ── Logging ─────────────────────────────────────────────────────────────
       RUST_LOG: ${RUST_LOG:-info}
