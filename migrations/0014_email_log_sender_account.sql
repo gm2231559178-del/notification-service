@@ -1,4 +1,4 @@
--- migrations/notification_db/0014_email_log_sender_account.sql
+-- migrations/0014_email_log_sender_account.sql
 --
 -- Adds a `sender_account` column to `email_log` so the named SMTP account
 -- used for the original delivery is preserved across manual retries.

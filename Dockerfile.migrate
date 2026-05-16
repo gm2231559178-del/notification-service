@@ -12,8 +12,7 @@ RUN apt-get update && apt-get install -y \
 RUN cargo install sqlx-cli
 
 # Copy both migration sets
-COPY migrations/notification_db /migrations/notification_db
-COPY migrations/business_db     /migrations/business_db
+COPY migrations /migrations
 
 # Copy and make the runner script executable
 COPY deploy/migrate.sh /migrate.sh

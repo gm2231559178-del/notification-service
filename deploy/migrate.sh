@@ -22,7 +22,7 @@ fi
 echo "[migrate] Running notification DB migrations..."
 sqlx migrate run \
   --database-url "$NOTIFICATION_DATABASE_URL" \
-  --source /migrations/notification_db
+  --source /migrations
 echo "[migrate] Notification DB migrations complete"
 
 # ── Business DB ───────────────────────────────────────────────────────────────

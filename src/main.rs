@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Failed to connect to PostgreSQL")?;
 
-    sqlx::migrate!("./migrations/notification_db")
+    sqlx::migrate!("./migrations")
         .run(&pool)
         .await
         .context("Failed to run migrations")?;
