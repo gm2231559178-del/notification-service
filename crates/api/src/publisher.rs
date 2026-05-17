@@ -105,7 +105,11 @@ impl Publisher {
     }
 }
 
-/// Open a fresh AMQP connection + channel and declare the exchange.
+/// Open a fresh AMQP connection + channel, declare the exchange, and enable
+/// publisher confirms so `basic_publish().await?.await` is meaningful.
+///
+/// Without `confirm_select` the broker never sends Ack/Nack frames and the
+/// second `.await` on the confirm future blocks indefinitely.
 async fn open_channel(amqp_url: &str, exchange: &str) -> anyhow::Result<Channel> {
     let conn = Connection::connect(amqp_url, ConnectionProperties::default())
         .await
@@ -114,6 +118,12 @@ async fn open_channel(amqp_url: &str, exchange: &str) -> anyhow::Result<Channel>
         .create_channel()
         .await
         .context("Publisher: create channel")?;
+
+    // Put the channel into confirm mode — required for publisher confirms.
+    channel
+        .confirm_select(lapin::options::ConfirmSelectOptions::default())
+        .await
+        .context("Publisher: confirm_select")?;
 
     // Declare the exchange (idempotent — safe if consumer already declared it).
     channel

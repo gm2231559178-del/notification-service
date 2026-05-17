@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO email_log\n                (event_id, event_type, recipient_email, recipient_name, status, payload, from_override, attachments, sender_account)\n            VALUES ($1, $2, $3, $4, 'PENDING', $5, $6, $7, $8)\n            ON CONFLICT (event_id, recipient_email) DO NOTHING\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c6c352191f42178636356e1ab71f62d1d9168027bdf3c0f3119fe896fc65de54"
+}

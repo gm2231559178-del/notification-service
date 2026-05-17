@@ -310,7 +310,24 @@ async fn process_one_recipient(
                     .await;
                 tokio::select! {
                     _ = sleep(delay) => {}
-                    _ = shutdown.cancelled() => return,
+                    _ = shutdown.cancelled() => {
+                        // Shutdown arrived during backoff. The row is already
+                        // PENDING (mark_failed with exhausted=false above), which
+                        // would leave it stuck with no queue message to pick it up.
+                        // Flip it to FAILED so the operator can see it and use the
+                        // retry API after the service restarts.
+                        warn!(
+                            event_id = %event.event_id,
+                            email    = %recipient.email,
+                            "Shutdown during rate-limit backoff — marking FAILED for manual retry"
+                        );
+                        let _ = ctx
+                            .store
+                            .mark_failed(event.event_id, &recipient.email,
+                                "service shutdown during rate-limit backoff", true)
+                            .await;
+                        return;
+                    }
                 }
             }
 
@@ -333,7 +350,23 @@ async fn process_one_recipient(
                     .await;
                 tokio::select! {
                     _ = sleep(delay) => {}
-                    _ = shutdown.cancelled() => return,
+                    _ = shutdown.cancelled() => {
+                        // Shutdown arrived during retry backoff. The row is already
+                        // PENDING; flip it to FAILED so it is visible and recoverable
+                        // via the retry API after restart.
+                        warn!(
+                            event_id = %event.event_id,
+                            email    = %recipient.email,
+                            attempt,
+                            "Shutdown during retry backoff — marking FAILED for manual retry"
+                        );
+                        let _ = ctx
+                            .store
+                            .mark_failed(event.event_id, &recipient.email,
+                                "service shutdown during retry backoff", true)
+                            .await;
+                        return;
+                    }
                 }
             }
         }

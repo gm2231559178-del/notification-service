@@ -152,7 +152,7 @@ services:
       NS__AMQP__URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASS:-guest}@rabbitmq:5672
       NS__MAILER__PASSWORD: ${SMTP_PASS:-}
       RUST_LOG: ${RUST_LOG:-info}
-      LOG_FORMAT: compact
+      LOG_FORMAT: pretty
     ports:
       - "${SERVICE_PORT:-8080}:8080"
       - "${METRICS_PORT:-9091}:9091"
@@ -189,6 +189,7 @@ services:
       NS_OUTBOX__POLL_INTERVAL_MS: ${OUTBOX_POLL_INTERVAL_MS:-1000}
       NS_OUTBOX__BATCH_SIZE: ${OUTBOX_BATCH_SIZE:-50}
       RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: pretty
     networks:
       - business
 

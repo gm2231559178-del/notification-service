@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, event_id, event_type, recipient_email, recipient_name, status, retry_count,\n                      total_attempts, last_error, payload, from_override, attachments, created_at, updated_at\n               FROM email_log WHERE event_id=$1 ORDER BY created_at",
+  "query": "SELECT id, event_id, event_type, recipient_email, recipient_name, status, retry_count,\n                      total_attempts, last_error, payload, from_override, attachments, sender_account, created_at, updated_at\n               FROM email_log WHERE event_id=$1 ORDER BY created_at",
   "describe": {
     "columns": [
       {
@@ -65,11 +65,16 @@
       },
       {
         "ordinal": 12,
+        "name": "sender_account",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
         "name": "created_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "updated_at",
         "type_info": "Timestamptz"
       }
@@ -92,9 +97,10 @@
       true,
       true,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "fd64c6d533394cc1658d5df8ddac859ccd92cbee5fa8d5aa2dc640c366c5c42c"
+  "hash": "0c54b08370404e141674dd7fe83831261e9c024fdd2aa9827286cb02d3541b29"
 }

@@ -55,7 +55,10 @@ pub struct AppConfig {
 
 /// SMTP credentials for a named sender account.
 /// All fields are required — there is no partial fallback to the global mailer.
-#[derive(Debug, Deserialize, Clone)]
+///
+/// The `password` field is redacted in `Debug` output so it never appears in
+/// log lines even when someone prints the full config for diagnostics.
+#[derive(Deserialize, Clone)]
 pub struct SmtpAccountConfig {
     pub host: String,
     pub port: u16,
@@ -63,6 +66,19 @@ pub struct SmtpAccountConfig {
     pub password: String,
     pub from_email: String,
     pub from_name: String,
+}
+
+impl std::fmt::Debug for SmtpAccountConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpAccountConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("from_email", &self.from_email)
+            .field("from_name", &self.from_name)
+            .finish()
+    }
 }
 
 fn default_max_rl_waits() -> u32 {
@@ -116,7 +132,7 @@ pub struct HttpConfig {
 }
 
 /// Which email backend to use.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Deserialize, Clone)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum MailerConfig {
     Smtp {
@@ -131,6 +147,27 @@ pub enum MailerConfig {
         url: String,
         auth_token: Option<String>,
     },
+}
+
+impl std::fmt::Debug for MailerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MailerConfig::Smtp { host, port, username, from_email, from_name, .. } => f
+                .debug_struct("MailerConfig::Smtp")
+                .field("host", host)
+                .field("port", port)
+                .field("username", username)
+                .field("password", &"[REDACTED]")
+                .field("from_email", from_email)
+                .field("from_name", from_name)
+                .finish(),
+            MailerConfig::Webhook { url, auth_token } => f
+                .debug_struct("MailerConfig::Webhook")
+                .field("url", url)
+                .field("auth_token", &auth_token.as_deref().map(|_| "[REDACTED]"))
+                .finish(),
+        }
+    }
 }
 
 impl AppConfig {
@@ -170,16 +207,15 @@ impl AppConfig {
         match &self.mailer {
             MailerConfig::Smtp {
                 host,
-                username,
                 from_email,
                 ..
             } => {
                 if host.is_empty() {
                     bail!("mailer.host must not be empty");
                 }
-                if username.is_empty() {
-                    bail!("mailer.username must not be empty");
-                }
+                // username may be empty — that disables credential handshake,
+                // which is required for dev catch-all servers (Mailpit, MailHog)
+                // that advertise no authentication mechanisms.
                 if from_email.is_empty() {
                     bail!("mailer.from_email must not be empty");
                 }
@@ -200,9 +236,7 @@ impl AppConfig {
             if acct.host.is_empty() {
                 bail!("sender_accounts.{name}.host must not be empty");
             }
-            if acct.username.is_empty() {
-                bail!("sender_accounts.{name}.username must not be empty");
-            }
+            // username may be empty for no-auth SMTP servers (see above).
             if acct.from_email.is_empty() {
                 bail!("sender_accounts.{name}.from_email must not be empty");
             }

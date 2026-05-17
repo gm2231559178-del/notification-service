@@ -1,16 +1,13 @@
 -- migrations/0010_create_email_template.sql
 --
--- Stores email templates in the database so new event types can be added
--- without a code change or service redeployment.
+-- Stores email templates in the database.  The template store is the
+-- authoritative source: if no active row exists for an event_type the
+-- consumer immediately marks the delivery FAILED (permanent error, no retry).
 --
--- The notification service loads templates at startup and caches them
--- in memory. The cache is refreshed on each consumer reconnect, and can
--- be force-refreshed by restarting the service.
---
--- Fallback behaviour: if the DB has no row for an event_type, the service
--- falls back to the compile-time templates in mailer::template::templates_for().
--- This keeps the existing ORDER_CONFIRMATION / PASSWORD_RESET / WELCOME
--- templates working with no data migration required.
+-- Operators add new event types by inserting a row here. No code change or
+-- redeploy is required. The in-memory cache (default TTL 5 minutes) means
+-- a new row is picked up within that window; call
+-- DELETE /templates/<event_type>/cache for immediate effect.
 --
 -- Column notes:
 --   type         — matches EmailEvent.event_type (e.g. 'ORDER_CONFIRMATION')

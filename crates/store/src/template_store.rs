@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use common::AppError;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 /// One template row from the `email_template` table.
 #[derive(Debug, Clone)]
@@ -30,11 +30,9 @@ struct CacheEntry {
 ///    `cache_ttl`.  A TTL of zero disables the cache entirely (always hits DB).
 /// 2. Database — on cache miss or expired entry, the row is fetched, cached,
 ///    and returned.
-/// 3. Compile-time fallback — if the DB has no row for the event type,
-///    the service falls back to the static templates in
-///    `mailer::template::templates_for()`.  This keeps the built-in
-///    ORDER_CONFIRMATION / PASSWORD_RESET / WELCOME templates working even
-///    on a fresh database before migration 0010 has been applied.
+/// 3. If no active row exists, `AppError::Template` is returned so the consumer
+///    immediately marks the delivery FAILED (no retries, routes to DLQ).
+///    Add a row to `email_template` to register a new event type.
 ///
 /// # Cache invalidation
 ///
@@ -116,31 +114,15 @@ impl TemplateStore {
             return Ok(tpl);
         }
 
-        // ── 3. Compile-time fallback ──────────────────────────────────────────
-        // Keeps built-in templates working without a DB row.
-        if let Ok((subject, body_html, body_text)) = mailer::templates_for(event_type) {
-            warn!(
-                event_type,
-                "Template not found in DB — using compile-time fallback"
-            );
-            let tpl = EmailTemplate {
-                subject: subject.to_owned(),
-                body_html: body_html.to_owned(),
-                body_text: body_text.to_owned(),
-            };
-            // Cache the fallback too so the warning only fires once per TTL window.
-            self.cache.write().await.insert(
-                event_type.to_owned(),
-                CacheEntry {
-                    template: tpl.clone(),
-                    inserted_at: Instant::now(),
-                },
-            );
-            return Ok(tpl);
-        }
-
+        // No DB row and no fallback — the event type is unknown.
+        // This is a permanent error: the consumer will mark the delivery FAILED
+        // immediately (no retries) so the message does not burn retry slots
+        // or block other recipients.
+        //
+        // To add a new template, INSERT a row into email_template and call
+        // DELETE /templates/<event_type>/cache (or wait for the TTL to expire).
         Err(AppError::Template(format!(
-            "Unknown event type '{event_type}' — no template in DB or compile-time fallback"
+            "Unknown event type '{event_type}' — add a row to email_template"
         )))
     }
 

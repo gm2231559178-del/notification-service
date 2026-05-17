@@ -5,49 +5,51 @@
 //!
 //! # Fetch strategy
 //!
-//! * All attachments are fetched **concurrently** via `futures::future::try_join_all`,
-//!   reducing total latency from O(n × rtt) to O(max_rtt).
-//! * One HTTP GET per attachment, with a configurable timeout (default 30 s).
+//! * All attachments are fetched **concurrently** via `futures::future::join_all`.
+//! * Each attachment is retried independently up to [`FETCH_MAX_RETRIES`] times
+//!   on transient failures (5xx, timeout, network error). This means a flaky
+//!   storage server for one file does not block delivery for the whole event.
+//! * A 4xx or size-exceeded response is a permanent failure — it is returned
+//!   immediately without consuming retry slots.
+//! * One HTTP GET per attachment attempt, with a 30 s timeout (set on the
+//!   shared `Client` at construction time).
 //! * Optional `Authorization: Bearer <token>` for internal service URLs.
-//! * Responses are size-capped at [`MAX_ATTACHMENT_BYTES`] (default 10 MB) to
-//!   prevent memory exhaustion from unexpectedly large files.
-//! * Non-2xx responses and timeouts are returned as errors; the caller decides
-//!   whether they are transient (retryable) or permanent.
+//! * Responses are size-capped at `max_bytes` (default 10 MiB) to prevent
+//!   memory exhaustion from unexpectedly large files.
 //!
 //! # Error classification
 //!
 //! | Failure | Error type | Retried |
 //! |---|---|---|
 //! | 4xx (bad URL, expired, forbidden) | `permanent:` prefix | No |
-//! | 5xx (server error) | transient | Yes |
+//! | 5xx (server error) | transient | Yes (up to FETCH_MAX_RETRIES) |
 //! | Timeout / network error | transient | Yes |
 //! | Response too large | `permanent:` prefix | No |
 //! | URL already expired (`max_age_secs`) | `permanent:` prefix | No |
+//! | All retries exhausted | last transient error | No further retries |
 
 use common::{AppError, AttachmentRef};
-use futures::future::try_join_all;
+use futures::future::join_all;
 use reqwest::{Client, StatusCode};
+use tokio::time::{sleep, Duration};
 use tracing::{debug, instrument, warn};
 
 use crate::message::ResolvedAttachment;
 
 /// Maximum allowed response body size per attachment (10 MiB).
-///
-/// Raised as a permanent error so the delivery is not retried.
-/// For larger files, instruct business systems to link instead of attach.
 pub const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
+/// How many times to retry a transient fetch failure before giving up.
+/// Delays follow 1 s, 2 s, 4 s (exponential, capped).
+const FETCH_MAX_RETRIES: u32 = 3;
 
 /// Fetches all attachment URLs for an event and returns resolved bytes.
 ///
-/// Uses the compiled-in [`MAX_ATTACHMENT_BYTES`] cap.  Call
-/// [`fetch_attachments_with_limit`] to supply a config-driven value.
-///
-/// All attachments are fetched **concurrently** so total latency is bounded
-/// by the slowest single attachment rather than the sum of all round-trips.
+/// Each attachment is retried independently on transient failures so a
+/// flaky storage server for one file does not block the others.
 /// Metadata and expiry checks run before any network calls.
 ///
 /// The returned `Vec` preserves the same order as `refs`.
-#[instrument(skip(client, refs, event_timestamp), fields(count = refs.len()))]
 pub async fn fetch_attachments(
     client: &Client,
     refs: &[AttachmentRef],
@@ -57,9 +59,7 @@ pub async fn fetch_attachments(
 }
 
 /// Like [`fetch_attachments`] but with an explicit per-attachment byte cap.
-///
-/// Set `max_bytes` from `AppConfig::mailer_max_attachment_bytes` so operators
-/// can tune the limit without a code change.
+#[instrument(skip(client, refs, event_timestamp), fields(count = refs.len()))]
 pub async fn fetch_attachments_with_limit(
     client: &Client,
     refs: &[AttachmentRef],
@@ -67,36 +67,84 @@ pub async fn fetch_attachments_with_limit(
     max_bytes: usize,
 ) -> Result<Vec<ResolvedAttachment>, AppError> {
     // ── 1. Validate metadata for every attachment before any network call ─────
-    // Fail fast on malformed refs without wasting bandwidth.
     for att_ref in refs {
         att_ref
             .validate(event_timestamp)
             .map_err(AppError::Mailer)?;
     }
 
-    // ── 2. Fetch all URLs concurrently ────────────────────────────────────────
-    // `try_join_all` cancels remaining futures on the first error, which is
-    // the desired behaviour: if any attachment is unavailable we should not
-    // partially attach others to the email.
+    // ── 2. Fetch all URLs concurrently, each with independent retry ───────────
+    //
+    // `join_all` (not `try_join_all`) is used here so every attachment gets
+    // its own retry budget. A transient 5xx on attachment B no longer cancels
+    // the already-in-flight fetch for attachment A.
+    //
+    // Each element of `results` is `Result<ResolvedAttachment, AppError>`.
+    // We collect all results first and then surface the first error (if any)
+    // so the caller still gets a clean `Err` when any attachment ultimately
+    // fails after exhausting retries.
     let futures: Vec<_> = refs
         .iter()
-        .map(|att_ref| fetch_one(client, att_ref, max_bytes))
+        .map(|att_ref| fetch_one_with_retry(client, att_ref, max_bytes))
         .collect();
 
-    let data_vec = try_join_all(futures).await?;
+    let results = join_all(futures).await;
 
-    // ── 3. Zip resolved bytes back with their metadata (order preserved) ──────
-    let resolved = refs
-        .iter()
-        .zip(data_vec)
-        .map(|(att_ref, data)| ResolvedAttachment {
-            filename: att_ref.filename.clone(),
-            content_type: att_ref.content_type.clone(),
-            data,
-        })
-        .collect();
+    // Surface the first error; collect resolved attachments in order.
+    let mut resolved = Vec::with_capacity(refs.len());
+    for result in results {
+        resolved.push(result?);
+    }
 
     Ok(resolved)
+}
+
+/// Fetch a single attachment, retrying on transient failures.
+///
+/// Permanent failures (4xx, size exceeded, URL expired) are returned
+/// immediately without consuming retry slots.
+async fn fetch_one_with_retry(
+    client: &Client,
+    att_ref: &AttachmentRef,
+    max_bytes: usize,
+) -> Result<ResolvedAttachment, AppError> {
+    let mut last_err = None;
+
+    for attempt in 0..=FETCH_MAX_RETRIES {
+        if attempt > 0 {
+            let delay = Duration::from_secs(1u64 << (attempt - 1).min(3));
+            warn!(
+                filename = %att_ref.filename,
+                attempt,
+                delay_secs = delay.as_secs(),
+                "Attachment fetch transient failure — retrying"
+            );
+            sleep(delay).await;
+        }
+
+        match fetch_one(client, att_ref, max_bytes).await {
+            Ok(data) => return Ok(ResolvedAttachment {
+                filename: att_ref.filename.clone(),
+                content_type: att_ref.content_type.clone(),
+                data,
+            }),
+            // Permanent errors are returned immediately — no retry.
+            // We borrow `m` only to copy the message string, then construct
+            // an owned error to return (AppError doesn't implement Clone).
+            Err(AppError::Mailer(ref m)) if m.starts_with("permanent:") => {
+                let msg = m.clone();
+                return Err(AppError::Mailer(msg));
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        AppError::Mailer(format!(
+            "attachment '{}' fetch failed after {FETCH_MAX_RETRIES} retries",
+            att_ref.filename
+        ))
+    }))
 }
 
 /// Fetch a single attachment URL and return the raw bytes.
@@ -123,9 +171,7 @@ async fn fetch_one(
 
     let status = resp.status();
 
-    // 429 → rate-limited by the file server.
-    // Must be checked BEFORE the generic is_client_error() branch below,
-    // because 429 is a 4xx and would otherwise be permanently failed.
+    // 429 → rate-limited by the file server (transient — will be retried).
     if status == StatusCode::TOO_MANY_REQUESTS {
         warn!(filename = %att_ref.filename, "Attachment source returned 429");
         return Err(AppError::RateLimited(format!(
@@ -135,7 +181,6 @@ async fn fetch_one(
     }
 
     // 4xx → permanent: bad URL, expired pre-signed URL, access denied, etc.
-    // No point retrying — the business system must re-publish with a fresh URL.
     if status.is_client_error() {
         return Err(AppError::Mailer(format!(
             "permanent: attachment '{}' fetch returned HTTP {status} ({})",
@@ -143,7 +188,7 @@ async fn fetch_one(
         )));
     }
 
-    // 5xx → transient: upstream server problem, safe to retry
+    // 5xx → transient: upstream server problem, safe to retry.
     if status.is_server_error() {
         return Err(AppError::Mailer(format!(
             "attachment '{}' fetch returned HTTP {status} — will retry",
@@ -151,7 +196,7 @@ async fn fetch_one(
         )));
     }
 
-    // Read body with size cap to prevent memory exhaustion
+    // Read body with size cap to prevent memory exhaustion.
     let bytes = resp.bytes().await.map_err(|e| {
         AppError::Mailer(format!("attachment '{}' read error: {e}", att_ref.filename))
     })?;
@@ -211,7 +256,7 @@ mod tests {
             filename: "file.pdf".into(),
             content_type: "application/pdf".into(),
             fetch_token: None,
-            max_age_secs: Some(0), // already expired
+            max_age_secs: Some(0),
         };
         let ts = Utc::now() - chrono::Duration::seconds(10);
         assert!(a.validate(&ts).unwrap_err().contains("expired"));

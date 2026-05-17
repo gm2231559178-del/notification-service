@@ -26,12 +26,45 @@ pub struct SmtpSender {
 
 impl SmtpSender {
     pub fn new(cfg: SmtpConfig) -> Result<Self, AppError> {
-        let creds = Credentials::new(cfg.username, cfg.password);
-        let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host)
-            .map_err(|e| AppError::Mailer(e.to_string()))?
-            .port(cfg.port)
-            .credentials(creds)
-            .build();
+        // TLS mode is selected automatically by port:
+        //   465          → implicit TLS (SMTPS)
+        //   587 / 25     → STARTTLS
+        //   anything else → plain (e.g. Mailpit / MailHog on port 1025)
+        //
+        // Credentials are only attached when a username is configured.
+        // Dev catch-all servers (Mailpit, MailHog) advertise no auth mechanisms
+        // and return "No compatible authentication mechanism was found" if the
+        // client attempts a credential handshake even with valid credentials.
+        let with_creds = !cfg.username.is_empty();
+
+        macro_rules! build_transport {
+            ($builder:expr) => {{
+                let b = $builder.map_err(|e| AppError::Mailer(e.to_string()))?.port(cfg.port);
+                if with_creds {
+                    b.credentials(Credentials::new(cfg.username, cfg.password)).build()
+                } else {
+                    b.build()
+                }
+            }};
+        }
+
+        let transport = match cfg.port {
+            465 => build_transport!(AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)),
+            587 | 25 => {
+                build_transport!(AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host))
+            }
+            _ => {
+                // builder_dangerous does not return a Result, so handle separately.
+                let b = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host)
+                    .port(cfg.port);
+                if with_creds {
+                    b.credentials(Credentials::new(cfg.username, cfg.password)).build()
+                } else {
+                    b.build()
+                }
+            }
+        };
+
         Ok(Self {
             transport,
             from_email: cfg.from_email,

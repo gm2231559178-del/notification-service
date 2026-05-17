@@ -11,11 +11,17 @@
 //! Rules:
 //! - Total length ≤ 254 characters (RFC-5321 §4.5.3.1.3).
 //! - Exactly one `@` separating a non-empty local part and domain.
+//! - Quoted local parts (`"user name"@example.com`) are rejected — virtually
+//!   no mail servers accept them and they are commonly a sign of user error.
 //! - Local part: 1–64 chars, no leading/trailing/consecutive dots.
 //!   Allowed characters: alphanumeric plus `!#$%&'*+/=?^_`{|}~.-`
 //! - Domain: labels separated by `.`, each 1–63 chars, alphanumeric plus
-//!   hyphens (not leading/trailing). Single-label domains (e.g. `localhost`)
-//!   are accepted for internal mail relays and SMTP test servers.
+//!   hyphens (not leading/trailing).
+//! - Multi-label domains (at least one dot) are required unless the domain is
+//!   exactly `localhost`, which is permitted for internal mail relays and SMTP
+//!   test servers.
+//! - IP-address literals (`user@[192.168.1.1]`) are rejected — they are
+//!   almost never legitimate in transactional email.
 
 /// Returns `true` if `addr` passes the structural email address check.
 pub fn is_valid_email(addr: &str) -> bool {
@@ -31,6 +37,12 @@ pub fn is_valid_email(addr: &str) -> bool {
 
 fn is_valid_local(local: &str) -> bool {
     if local.is_empty() || local.len() > 64 {
+        return false;
+    }
+    // Reject quoted local parts: "user name"@example.com
+    // These are technically valid per RFC but are almost universally
+    // unsupported and are a common sign of user error or injection.
+    if local.starts_with('"') || local.ends_with('"') {
         return false;
     }
     if local.starts_with('.') || local.ends_with('.') || local.contains("..") {
@@ -67,8 +79,16 @@ fn is_valid_domain(domain: &str) -> bool {
     if domain.is_empty() || domain.len() > 253 {
         return false;
     }
+    // Reject IP address literals: [192.168.1.1]
+    if domain.starts_with('[') {
+        return false;
+    }
+    // Allow the special single-label "localhost" for internal relay support.
+    // All other domains must contain at least one dot (i.e. have a TLD).
     let labels: Vec<&str> = domain.split('.').collect();
-    // Allow single-label domains (e.g. "localhost") for internal relay support.
+    if labels.len() == 1 && domain != "localhost" {
+        return false;
+    }
     labels.iter().all(|label| {
         !label.is_empty()
             && label.len() <= 63
@@ -147,5 +167,23 @@ mod tests {
     fn rejects_address_over_254_chars() {
         let long_local = "a".repeat(65);
         assert!(!is_valid_email(&format!("{long_local}@example.com")));
+    }
+    #[test]
+    fn rejects_quoted_local_part() {
+        assert!(!is_valid_email("\"user name\"@example.com"));
+    }
+    #[test]
+    fn rejects_ip_address_literal() {
+        assert!(!is_valid_email("user@[192.168.1.1]"));
+    }
+    #[test]
+    fn rejects_single_label_domain_non_localhost() {
+        // e.g. "user@domain" with no TLD — almost always a typo
+        assert!(!is_valid_email("user@domain"));
+        assert!(!is_valid_email("user@intranet"));
+    }
+    #[test]
+    fn localhost_still_accepted() {
+        assert!(is_valid_email("postmaster@localhost"));
     }
 }

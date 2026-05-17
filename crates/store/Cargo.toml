@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 common      = { path = "../common" }
-mailer      = { path = "../mailer" }
 
 tokio       = { workspace = true, features = ["sync"] }
 serde       = { workspace = true }

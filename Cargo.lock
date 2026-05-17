@@ -3693,7 +3693,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "common",
- "mailer",
  "serde",
  "serde_json",
  "sqlx",

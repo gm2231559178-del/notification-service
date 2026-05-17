@@ -69,6 +69,12 @@ template_cache_ttl_secs = 300  # 5 minutes
 max_attachment_bytes = 10485760  # 10 * 1024 * 1024
 
 # ── Choose one backend ────────────────────────────────────────────────────────
+#
+# TLS mode is selected automatically by port:
+#   465  → implicit TLS (SMTPS)        e.g. AWS SES, Fastmail
+#   587  → STARTTLS                    e.g. SendGrid, Mailgun, Gmail SMTP
+#   25   → STARTTLS                    standard MTA submission
+#   other (e.g. 1025, 2525) → plain    dev catch-all servers (Mailpit, MailHog)
 
 # Option A: SMTP
 [mailer]
