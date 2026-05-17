@@ -39,9 +39,12 @@ impl SmtpSender {
 
         macro_rules! build_transport {
             ($builder:expr) => {{
-                let b = $builder.map_err(|e| AppError::Mailer(e.to_string()))?.port(cfg.port);
+                let b = $builder
+                    .map_err(|e| AppError::Mailer(e.to_string()))?
+                    .port(cfg.port);
                 if with_creds {
-                    b.credentials(Credentials::new(cfg.username, cfg.password)).build()
+                    b.credentials(Credentials::new(cfg.username, cfg.password))
+                        .build()
                 } else {
                     b.build()
                 }
@@ -51,14 +54,17 @@ impl SmtpSender {
         let transport = match cfg.port {
             465 => build_transport!(AsyncSmtpTransport::<Tokio1Executor>::relay(&cfg.host)),
             587 | 25 => {
-                build_transport!(AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&cfg.host))
+                build_transport!(AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(
+                    &cfg.host
+                ))
             }
             _ => {
                 // builder_dangerous does not return a Result, so handle separately.
                 let b = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host)
                     .port(cfg.port);
                 if with_creds {
-                    b.credentials(Credentials::new(cfg.username, cfg.password)).build()
+                    b.credentials(Credentials::new(cfg.username, cfg.password))
+                        .build()
                 } else {
                     b.build()
                 }

@@ -6,8 +6,8 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use subtle::ConstantTimeEq;
 use serde_json::json;
+use subtle::ConstantTimeEq;
 use tower_http::trace::TraceLayer;
 
 use crate::{

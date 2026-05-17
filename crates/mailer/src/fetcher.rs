@@ -123,11 +123,13 @@ async fn fetch_one_with_retry(
         }
 
         match fetch_one(client, att_ref, max_bytes).await {
-            Ok(data) => return Ok(ResolvedAttachment {
-                filename: att_ref.filename.clone(),
-                content_type: att_ref.content_type.clone(),
-                data,
-            }),
+            Ok(data) => {
+                return Ok(ResolvedAttachment {
+                    filename: att_ref.filename.clone(),
+                    content_type: att_ref.content_type.clone(),
+                    data,
+                })
+            }
             // Permanent errors are returned immediately — no retry.
             // We borrow `m` only to copy the message string, then construct
             // an owned error to return (AppError doesn't implement Clone).

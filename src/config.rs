@@ -152,7 +152,14 @@ pub enum MailerConfig {
 impl std::fmt::Debug for MailerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MailerConfig::Smtp { host, port, username, from_email, from_name, .. } => f
+            MailerConfig::Smtp {
+                host,
+                port,
+                username,
+                from_email,
+                from_name,
+                ..
+            } => f
                 .debug_struct("MailerConfig::Smtp")
                 .field("host", host)
                 .field("port", port)
@@ -206,9 +213,7 @@ impl AppConfig {
 
         match &self.mailer {
             MailerConfig::Smtp {
-                host,
-                from_email,
-                ..
+                host, from_email, ..
             } => {
                 if host.is_empty() {
                     bail!("mailer.host must not be empty");
