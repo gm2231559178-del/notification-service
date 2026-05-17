@@ -1,34 +1,33 @@
-# ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM rust:1.94-slim-bookworm AS builder
-
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
+# ── Stage 1: chef prepare ─────────────────────────────────────────────────────
+# cargo-chef computes the exact set of dependencies from Cargo.toml/Cargo.lock
+# and produces a recipe.json that is stable as long as deps don't change.
+FROM rust:1.94-slim-bookworm AS chef
+RUN cargo install cargo-chef --locked
+RUN apt-get update && apt-get install -y pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ── Stage 2: build deps ───────────────────────────────────────────────────────
+# This layer is only invalidated when recipe.json changes (i.e. a dep version
+# changes in Cargo.toml/Cargo.lock).  A source-only change skips straight to
+# Stage 3 and saves the full dep compilation time.
+FROM chef AS builder
 
 ENV SQLX_OFFLINE=true
 
-# Cache dependencies first (layer-friendly).
-# ALL workspace member Cargo.tomls must be present here so that
-# `cargo build` can resolve the full workspace and actually compile
-# (and cache) the dependency graph.  Missing any member causes the
-# workspace resolver to fail, the build to exit via `|| true`, and
-# zero dependencies to be cached — defeating the whole layer.
-COPY Cargo.toml Cargo.lock ./
-COPY .sqlx/        .sqlx/
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
 
-
-
-# Now copy real source and build
-COPY src/           src/
-COPY crates/        crates/
-COPY migrations/    migrations/
-COPY config/        config/
+# ── Stage 3: build workspace ──────────────────────────────────────────────────
+# Deps are already compiled above. Only workspace crates recompile here.
+COPY . .
 RUN cargo build --release
 
-# ── Stage 2: runtime ──────────────────────────────────────────────────────────
+# ── Stage 4: runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
 # curl is required by the docker-compose healthcheck
