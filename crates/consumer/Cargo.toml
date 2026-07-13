@@ -28,3 +28,6 @@ tokio-util   = { version = "0.7" }
 metrics      = { workspace = true }
 
 reqwest = { workspace = true }
+
+[dev-dependencies]
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres"] }

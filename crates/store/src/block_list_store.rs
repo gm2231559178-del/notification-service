@@ -21,12 +21,22 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use common::AppError;
 use moka::future::Cache;
 use sqlx::PgPool;
 use tracing::{debug, info};
 
 const CACHE_KEY: &str = "block_list";
+
+/// Trait for checking whether an email address is blocked.
+///
+/// Scoped to the consumer's `check()` call so that tests can substitute a
+/// mock without needing a real DB pool.
+#[async_trait]
+pub trait BlockListChecker: Send + Sync {
+    async fn check(&self, email: &str) -> Result<(), AppError>;
+}
 
 /// A snapshot of all active block/allow-list entries loaded from the DB.
 #[derive(Clone, Default)]
@@ -260,5 +270,12 @@ impl BlockListStore {
 
         self.cache.insert(CACHE_KEY, snap.clone()).await;
         Ok(snap)
+    }
+}
+
+#[async_trait]
+impl BlockListChecker for BlockListStore {
+    async fn check(&self, email: &str) -> Result<(), AppError> {
+        BlockListStore::check(self, email).await
     }
 }

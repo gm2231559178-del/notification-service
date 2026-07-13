@@ -12,7 +12,7 @@ use metrics::{counter, histogram};
 use rate_limiter::MailRateLimiter;
 use recipient_filter::RecipientFilter;
 use store::{
-    BlockListStore, EmailInsertPendingArgs, InsertResult, NotificationStore, TemplateStore,
+    BlockListChecker, EmailInsertPendingArgs, InsertResult, NotificationStore, TemplateResolver,
     CHANNEL_EMAIL,
 };
 use tracing::{info, instrument, warn};
@@ -47,7 +47,7 @@ pub struct EffectiveCcBcc {
 #[derive(Clone)]
 pub struct ProcessorContext {
     pub store: Arc<dyn NotificationStore>,
-    pub template_store: TemplateStore,
+    pub template_store: Arc<dyn TemplateResolver>,
     /// Global default sender (SMTP or webhook) used when no named account matches.
     pub sender: Arc<dyn EmailSender>,
     /// Registry of named per-business-system SMTP accounts.
@@ -56,7 +56,7 @@ pub struct ProcessorContext {
     pub filter: RecipientFilter,
     /// DB-backed block/allow-list. Checked after `filter`; entries can be added
     /// or removed at runtime via the HTTP API without a service restart.
-    pub block_list_store: BlockListStore,
+    pub block_list_store: Arc<dyn BlockListChecker>,
     pub rate_limiter: MailRateLimiter,
 }
 
@@ -148,32 +148,14 @@ pub async fn process_recipient(
     // on the first attempt, returns Failed, and the retry loop burns through
     // max_retries on a Duplicate path before giving up — producing log noise and
     // wasting retry budget on an error that is not transient.
-    let subject_result = render_template(&prefetched_template.subject, &event.payload);
-    let html_result = render_html_template(&prefetched_template.body_html, &event.payload);
-    let text_result = render_template(&prefetched_template.body_text, &event.payload);
-
-    let (subject, body_html, body_text) = match (subject_result, html_result, text_result) {
-        (Ok(s), Ok(h), Ok(t)) => (s, h, t),
-        (sr, hr, tr) => {
-            if let Err(ref e) = sr {
-                tracing::warn!(component = "subject",   error = %e, "Template render failed");
-            }
-            if let Err(ref e) = hr {
-                tracing::warn!(component = "body_html", error = %e, "Template render failed");
-            }
-            if let Err(ref e) = tr {
-                tracing::warn!(component = "body_text", error = %e, "Template render failed");
-            }
-            // The match arm fires only when at least one result is Err, so this
-            // chain always yields Some.  expect() states the invariant without
-            // the panic-in-release footgun of unreachable! inside unwrap_or_else.
-            let first_err = sr
-                .err()
-                .or(hr.err())
-                .or(tr.err())
-                .expect("match arm requires at least one Err among (sr, hr, tr)");
-            return RecipientOutcome::Failed(first_err);
-        }
+    let rendered = match render_all_templates(
+        &prefetched_template.subject,
+        &prefetched_template.body_html,
+        &prefetched_template.body_text,
+        &event.payload,
+    ) {
+        Ok(r) => r,
+        Err(e) => return RecipientOutcome::Failed(e),
     };
 
     // ── 3. Idempotency ───────────────────────────────────────────────────────
@@ -182,37 +164,8 @@ pub async fn process_recipient(
     // losing the from_override / attachments / cc / bcc in the DB row.
     // In practice serde_json::to_value never fails on these well-typed structs,
     // but making failures loud protects against future field changes.
-    let from_override_json = match email_opts
-        .from_override
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()
-        .map_err(|e| AppError::permanent_mailer(format!("failed to serialize from_override: {e}")))
-    {
-        Ok(v) => v,
-        Err(e) => return RecipientOutcome::Failed(e),
-    };
-    let attachments_json = if email_opts.attachments.is_empty() {
-        None
-    } else {
-        match serde_json::to_value(&email_opts.attachments).map_err(|e| {
-            AppError::permanent_mailer(format!("failed to serialize attachments: {e}"))
-        }) {
-            Ok(v) => Some(v),
-            Err(e) => return RecipientOutcome::Failed(e),
-        }
-    };
-
-    // Serialize the post-filter (effective) CC/BCC lists so the DB record
-    // accurately reflects what was actually delivered, not the raw unfiltered
-    // input.  Storing pre-filter lists would show addresses that were never
-    // delivered to, and would waste a filter cycle on every retry.
-    let cc_json = match serialize_recipient_list(effective_cc, "cc") {
-        Ok(v) => v,
-        Err(e) => return RecipientOutcome::Failed(e),
-    };
-    let bcc_json = match serialize_recipient_list(effective_bcc, "bcc") {
-        Ok(v) => v,
+    let fields = match serialize_email_fields(email_opts, effective_cc, effective_bcc) {
+        Ok(f) => f,
         Err(e) => return RecipientOutcome::Failed(e),
     };
 
@@ -224,11 +177,11 @@ pub async fn process_recipient(
             recipient_email: &recipient.email,
             recipient_name: recipient.name.as_deref(),
             payload: &event.payload,
-            from_override: from_override_json.as_ref(),
-            attachments: attachments_json.as_ref(),
+            from_override: fields.from_override.as_ref(),
+            attachments: fields.attachments.as_ref(),
             sender_account: email_opts.sender_account.as_deref(),
-            cc: cc_json.as_ref(),
-            bcc: bcc_json.as_ref(),
+            cc: fields.cc.as_ref(),
+            bcc: fields.bcc.as_ref(),
             send_mode: email_opts.send_mode.as_str(),
             group_retry_mode: None, // individual mode — group_retry_mode is not applicable
             to_recipients: None,    // individual mode — every recipient has its own row
@@ -285,32 +238,16 @@ pub async fn process_recipient(
 
     // (subject, body_html, body_text rendered above at step 2c, before the DB write)
 
-    let msg = EmailMessage {
-        event_id: event.event_id,
-        to_email: recipient.email.clone(),
-        to_name: recipient.name.clone(),
-        to_extra: vec![], // individual mode: one To: address only
-        subject,
-        body_html,
-        body_text,
-        from_email_override,
-        from_name_override,
-        attachments: attachments.to_vec(),
-        cc: effective_cc
-            .iter()
-            .map(|r| MailboxRef {
-                email: r.email.clone(),
-                name: r.name.clone(),
-            })
-            .collect(),
-        bcc: effective_bcc
-            .iter()
-            .map(|r| MailboxRef {
-                email: r.email.clone(),
-                name: r.name.clone(),
-            })
-            .collect(),
-    };
+    let msg = build_email_message(
+        event,
+        recipient,
+        vec![], // individual mode: one To: address only
+        rendered,
+        (from_email_override, from_name_override),
+        attachments,
+        effective_cc,
+        effective_bcc,
+    );
 
     // ── 6 & 7. Rate-limit + send ─────────────────────────────────────────────
     execute_send(
@@ -449,66 +386,21 @@ pub async fn process_group(
     // ── 2c. Template rendering (before DB write) ──────────────────────────────────
     // Same rationale as process_recipient step 2c: fail before writing any DB row
     // so a permanently broken template does not burn retry budget.
-    let subject_result = render_template(&prefetched_template.subject, &event.payload);
-    let html_result = render_html_template(&prefetched_template.body_html, &event.payload);
-    let text_result = render_template(&prefetched_template.body_text, &event.payload);
-
-    let (subject, body_html, body_text) = match (subject_result, html_result, text_result) {
-        (Ok(s), Ok(h), Ok(t)) => (s, h, t),
-        (sr, hr, tr) => {
-            if let Err(ref e) = sr {
-                tracing::warn!(component = "subject",   error = %e, "Template render failed");
-            }
-            if let Err(ref e) = hr {
-                tracing::warn!(component = "body_html", error = %e, "Template render failed");
-            }
-            if let Err(ref e) = tr {
-                tracing::warn!(component = "body_text", error = %e, "Template render failed");
-            }
-            // Same reasoning as process_recipient: the arm fires only when
-            // at least one result is Err, so expect() is safe and clearer.
-            let first_err = sr
-                .err()
-                .or(hr.err())
-                .or(tr.err())
-                .expect("match arm requires at least one Err among (sr, hr, tr)");
-            return RecipientOutcome::Failed(first_err);
-        }
+    let rendered = match render_all_templates(
+        &prefetched_template.subject,
+        &prefetched_template.body_html,
+        &prefetched_template.body_text,
+        &event.payload,
+    ) {
+        Ok(r) => r,
+        Err(e) => return RecipientOutcome::Failed(e),
     };
 
     // ── 3. Idempotency ───────────────────────────────────────────────────────
     // Use map_err + ? for the same reason as in process_recipient: failures
     // should be loud, not silently stored as NULL.
-    let from_override_json = match email_opts
-        .from_override
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()
-        .map_err(|e| AppError::permanent_mailer(format!("failed to serialize from_override: {e}")))
-    {
-        Ok(v) => v,
-        Err(e) => return RecipientOutcome::Failed(e),
-    };
-    let attachments_json = if email_opts.attachments.is_empty() {
-        None
-    } else {
-        match serde_json::to_value(&email_opts.attachments).map_err(|e| {
-            AppError::permanent_mailer(format!("failed to serialize attachments: {e}"))
-        }) {
-            Ok(v) => Some(v),
-            Err(e) => return RecipientOutcome::Failed(e),
-        }
-    };
-    // Serialize the post-filter (effective) CC/BCC lists so the DB record
-    // accurately reflects what was actually delivered, not the raw unfiltered
-    // input.  Storing pre-filter lists would show addresses that were never
-    // delivered to, and would waste a filter cycle on every retry.
-    let cc_json = match serialize_recipient_list(effective_cc, "cc") {
-        Ok(v) => v,
-        Err(e) => return RecipientOutcome::Failed(e),
-    };
-    let bcc_json = match serialize_recipient_list(effective_bcc, "bcc") {
-        Ok(v) => v,
+    let fields = match serialize_email_fields(email_opts, effective_cc, effective_bcc) {
+        Ok(f) => f,
         Err(e) => return RecipientOutcome::Failed(e),
     };
     let group_retry_mode_str = match email_opts.group_retry_mode {
@@ -523,10 +415,7 @@ pub async fn process_group(
     struct SharedArgs<'a> {
         event: &'a NotificationEvent,
         email_opts: &'a common::EmailOptions,
-        from_override_json: Option<&'a serde_json::Value>,
-        attachments_json: Option<&'a serde_json::Value>,
-        cc_json: Option<&'a serde_json::Value>,
-        bcc_json: Option<&'a serde_json::Value>,
+        fields: &'a SerializedEmailFields,
         group_retry_mode_str: &'a str,
         /// Serialized full To: list. Non-None only for GroupRetryMode::Whole so
         /// that the single primary row records who else received the email.
@@ -539,11 +428,11 @@ pub async fn process_group(
             recipient_email: &r.email,
             recipient_name: r.name.as_deref(),
             payload: &s.event.payload,
-            from_override: s.from_override_json,
-            attachments: s.attachments_json,
+            from_override: s.fields.from_override.as_ref(),
+            attachments: s.fields.attachments.as_ref(),
             sender_account: s.email_opts.sender_account.as_deref(),
-            cc: s.cc_json,
-            bcc: s.bcc_json,
+            cc: s.fields.cc.as_ref(),
+            bcc: s.fields.bcc.as_ref(),
             send_mode: s.email_opts.send_mode.as_str(),
             group_retry_mode: Some(s.group_retry_mode_str),
             to_recipients: s.to_recipients_json,
@@ -570,10 +459,7 @@ pub async fn process_group(
     let shared = SharedArgs {
         event,
         email_opts,
-        from_override_json: from_override_json.as_ref(),
-        attachments_json: attachments_json.as_ref(),
-        cc_json: cc_json.as_ref(),
-        bcc_json: bcc_json.as_ref(),
+        fields: &fields,
         group_retry_mode_str,
         to_recipients_json: to_recipients_json.as_ref(),
     };
@@ -771,7 +657,7 @@ pub async fn process_group(
     // DB mark_sent calls, and the `to_count` log field all stay consistent.
     let recipients = allowed_recipients;
 
-    // (subject, body_html, body_text rendered above at step 2c, before the DB write)
+    // (rendered at step 2c, before the DB write)
 
     // `primary` is `recipients[0]` from the original (pre-filter) list and was
     // confirmed Inserted above.  It is never in `already_sent_emails` so it is
@@ -786,32 +672,16 @@ pub async fn process_group(
         })
         .collect();
 
-    let msg = EmailMessage {
-        event_id: event.event_id,
-        to_email: primary.email.clone(),
-        to_name: primary.name.clone(),
+    let msg = build_email_message(
+        event,
+        primary,
         to_extra,
-        subject,
-        body_html,
-        body_text,
-        from_email_override,
-        from_name_override,
-        attachments: attachments.to_vec(),
-        cc: effective_cc
-            .iter()
-            .map(|r| MailboxRef {
-                email: r.email.clone(),
-                name: r.name.clone(),
-            })
-            .collect(),
-        bcc: effective_bcc
-            .iter()
-            .map(|r| MailboxRef {
-                email: r.email.clone(),
-                name: r.name.clone(),
-            })
-            .collect(),
-    };
+        rendered,
+        (from_email_override, from_name_override),
+        attachments,
+        effective_cc,
+        effective_bcc,
+    );
 
     // ── 6 & 7. Rate-limit + send ─────────────────────────────────────────────
     execute_send(
@@ -845,7 +715,7 @@ pub async fn process_group(
 ///
 /// Passed to [`execute_send`] so the shared rate-limit + send + mark_sent
 /// logic can handle both individual and group sends without duplicating code.
-enum SendTargets<'a> {
+pub(crate) enum SendTargets<'a> {
     /// Individual send: exactly one row to mark SENT.
     Individual {
         event_id: uuid::Uuid,
@@ -879,127 +749,24 @@ async fn execute_send(
     targets: SendTargets<'_>,
 ) -> RecipientOutcome {
     // ── Rate-limit token ──────────────────────────────────────────────────────
-    // Only increment the counter when we had to actually wait — i.e. the
-    // service is being throttled.  Incrementing unconditionally inflated the
-    // metric even when a token was immediately available, making it useless as
-    // a "we are being throttled" alert signal.
-    match ctx.rate_limiter.wait_for_token(shutdown).await {
-        rate_limiter::TokenResult::Acquired => {}
-        rate_limiter::TokenResult::AcquiredAfterWait => {
-            counter!("email_rate_limit_waits_total",
-                "event_type" => event_type.to_owned())
-            .increment(1);
-        }
-        rate_limiter::TokenResult::Shutdown => {
-            return RecipientOutcome::Failed(AppError::Queue(
-                "service shutdown during rate-limit wait".into(),
-            ));
-        }
+    if let Err(outcome) = acquire_rate_limit_token(&ctx.rate_limiter, event_type, shutdown).await {
+        return outcome;
     }
 
     // ── Sender selection ──────────────────────────────────────────────────────
-    let sender = match ctx.sender_registry.resolve(sender_account) {
-        Some(s) => s,
-        None => {
-            if let Some(account) = sender_account {
-                warn!(
-                    account,
-                    event_type,
-                    "Named sender_account not found in registry — falling back to global sender. \
-                     Check [sender_accounts.{account}] in config."
-                );
-            }
-            Arc::clone(&ctx.sender)
-        }
-    };
+    let sender = resolve_sender(
+        &ctx.sender_registry,
+        &ctx.sender,
+        sender_account,
+        event_type,
+    );
 
     // ── Send ──────────────────────────────────────────────────────────────────
     let send_start = std::time::Instant::now();
     match sender.send(msg).await {
         Ok(()) => {
             let elapsed = send_start.elapsed().as_secs_f64();
-
-            // ── mark_sent ─────────────────────────────────────────────────────
-            // IMPORTANT: a mark_sent failure after a successful SMTP send means
-            // the email was delivered but the row stays PENDING.  On AMQP
-            // re-delivery the idempotency check will see PENDING (Duplicate) and
-            // re-send, producing a duplicate.  Log at WARN so the operator can
-            // inspect and manually mark the row SENT if needed.
-            match &targets {
-                SendTargets::Individual { event_id, email } => {
-                    if let Err(e) = ctx.store.mark_sent(*event_id, email).await {
-                        warn!(
-                            event_id = %event_id,
-                            email    = %email,
-                            error    = %e,
-                            "Email delivered but mark_sent DB write failed — \
-                             row remains PENDING; re-delivery will attempt to re-send"
-                        );
-                        counter!("email_mark_sent_failed_total",
-                            "event_type" => event_type.to_owned())
-                        .increment(1);
-                    }
-                }
-                SendTargets::Group {
-                    event_id,
-                    primary_email,
-                    secondaries,
-                    ..
-                } => {
-                    if let Err(e) = ctx.store.mark_sent(*event_id, primary_email).await {
-                        warn!(
-                            event_id = %event_id,
-                            email    = %primary_email,
-                            error    = %e,
-                            "Group email delivered but mark_sent DB write failed for primary — \
-                             row remains PENDING; re-delivery will attempt to re-send"
-                        );
-                        counter!("email_mark_sent_failed_total",
-                            "event_type" => event_type.to_owned())
-                        .increment(1);
-                    }
-                    // Mark secondary rows SENT for GroupRetryMode::Individual.
-                    //
-                    // IMPORTANT: this loop marks rows one by one after SMTP has
-                    // already accepted the message.  If the process crashes mid-loop,
-                    // some secondary rows remain PENDING.  On AMQP re-delivery the
-                    // idempotency check sees PENDING (Duplicate) and re-sends,
-                    // potentially causing duplicates.  This is the same trade-off as
-                    // the primary mark_sent above; both are logged at WARN so operators
-                    // can manually correct stuck rows.  Individual mode accepts this
-                    // risk in exchange for per-recipient retry granularity on the first
-                    // (pre-crash) attempt.
-                    //
-                    // `mark_sent_failures` tracks how many secondaries failed so we
-                    // can emit a single event-level counter (`email_group_mark_sent_partial_total`)
-                    // that is easy to alert on, in addition to the per-failure
-                    // `email_mark_sent_failed_total` increments below.
-                    let mut mark_sent_failures: usize = 0;
-                    for email in secondaries {
-                        if let Err(e) = ctx.store.mark_sent(*event_id, email).await {
-                            warn!(
-                                event_id = %event_id,
-                                email    = %email,
-                                error    = %e,
-                                "Group email delivered but mark_sent DB write failed for secondary \
-                                 recipient — row remains PENDING; re-delivery will attempt to re-send"
-                            );
-                            counter!("email_mark_sent_failed_total",
-                                "event_type" => event_type.to_owned())
-                            .increment(1);
-                            mark_sent_failures += 1;
-                        }
-                    }
-                    // Fire once per group send if at least one secondary failed.
-                    // Alert on this metric to catch partial-completion events before
-                    // they result in re-send duplicates on the next AMQP redelivery.
-                    if mark_sent_failures > 0 {
-                        counter!("email_group_mark_sent_partial_total",
-                            "event_type" => event_type.to_owned())
-                        .increment(1);
-                    }
-                }
-            }
+            mark_sent_for_targets(&ctx.store, &targets, event_type).await;
 
             counter!("emails_sent_total",
                 "event_type" => event_type.to_owned())
@@ -1042,10 +809,270 @@ async fn execute_send(
     }
 }
 
+/// Acquire a rate-limit token before sending.
+///
+/// Returns `Ok(())` when a token is available (immediately or after waiting).
+/// Returns `Err(RecipientOutcome::Failed)` on shutdown.
+pub(crate) async fn acquire_rate_limit_token(
+    rate_limiter: &MailRateLimiter,
+    event_type: &str,
+    shutdown: &tokio_util::sync::CancellationToken,
+) -> Result<(), RecipientOutcome> {
+    match rate_limiter.wait_for_token(shutdown).await {
+        rate_limiter::TokenResult::Acquired => {}
+        rate_limiter::TokenResult::AcquiredAfterWait => {
+            counter!("email_rate_limit_waits_total",
+                "event_type" => event_type.to_owned())
+            .increment(1);
+        }
+        rate_limiter::TokenResult::Shutdown => {
+            return Err(RecipientOutcome::Failed(AppError::Queue(
+                "service shutdown during rate-limit wait".into(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve which sender to use: named account from the registry, or global fallback.
+pub(crate) fn resolve_sender(
+    registry: &SenderRegistry,
+    global_sender: &Arc<dyn EmailSender>,
+    sender_account: Option<&str>,
+    event_type: &str,
+) -> Arc<dyn EmailSender> {
+    match registry.resolve(sender_account) {
+        Some(s) => s,
+        None => {
+            if let Some(account) = sender_account {
+                warn!(
+                    account,
+                    event_type,
+                    "Named sender_account not found in registry — falling back to global sender. \
+                     Check [sender_accounts.{account}] in config."
+                );
+            }
+            Arc::clone(global_sender)
+        }
+    }
+}
+
+/// Mark notification_log rows as SENT after a successful send.
+///
+/// Handles both individual and group targets. For group sends with
+/// `GroupRetryMode::Individual`, secondary rows are marked one by one. Failures
+/// are logged at WARN so operators can manually correct stuck rows.
+pub(crate) async fn mark_sent_for_targets(
+    store: &Arc<dyn NotificationStore>,
+    targets: &SendTargets<'_>,
+    event_type: &str,
+) {
+    match targets {
+        SendTargets::Individual { event_id, email } => {
+            if let Err(e) = store.mark_sent(*event_id, email).await {
+                warn!(
+                    event_id = %event_id,
+                    email    = %email,
+                    error    = %e,
+                    "Email delivered but mark_sent DB write failed — \
+                     row remains PENDING; re-delivery will attempt to re-send"
+                );
+                counter!("email_mark_sent_failed_total",
+                    "event_type" => event_type.to_owned())
+                .increment(1);
+            }
+        }
+        SendTargets::Group {
+            event_id,
+            primary_email,
+            secondaries,
+            ..
+        } => {
+            if let Err(e) = store.mark_sent(*event_id, primary_email).await {
+                warn!(
+                    event_id = %event_id,
+                    email    = %primary_email,
+                    error    = %e,
+                    "Group email delivered but mark_sent DB write failed for primary — \
+                     row remains PENDING; re-delivery will attempt to re-send"
+                );
+                counter!("email_mark_sent_failed_total",
+                    "event_type" => event_type.to_owned())
+                .increment(1);
+            }
+            let mut mark_sent_failures: usize = 0;
+            for email in secondaries {
+                if let Err(e) = store.mark_sent(*event_id, email).await {
+                    warn!(
+                        event_id = %event_id,
+                        email    = %email,
+                        error    = %e,
+                        "Group email delivered but mark_sent DB write failed for secondary \
+                         recipient — row remains PENDING; re-delivery will attempt to re-send"
+                    );
+                    counter!("email_mark_sent_failed_total",
+                        "event_type" => event_type.to_owned())
+                    .increment(1);
+                    mark_sent_failures += 1;
+                }
+            }
+            if mark_sent_failures > 0 {
+                counter!("email_group_mark_sent_partial_total",
+                    "event_type" => event_type.to_owned())
+                .increment(1);
+            }
+        }
+    }
+}
+
 fn resolve_from_override(ov: Option<&FromOverride>) -> (Option<String>, Option<String>) {
     match ov {
         None => (None, None),
         Some(o) => (Some(o.email.clone()), o.name.clone()),
+    }
+}
+
+// ── Shared rendering / serialization / message-building helpers ────────────────
+//
+// These pure helpers eliminate duplication between `process_recipient` and
+// `process_group`.  Each is independently unit-testable without DB or network.
+
+pub(crate) struct RenderedTemplates {
+    pub(crate) subject: String,
+    pub(crate) body_html: String,
+    pub(crate) body_text: String,
+}
+
+/// Render all three template parts (subject, HTML body, text body).
+///
+/// Returns `Err` with the first render error if any part fails.  All three
+/// errors are logged at WARN before returning so operators see every broken
+/// part in a single log entry rather than chasing them one at a time.
+pub(crate) fn render_all_templates(
+    subject_tpl: &str,
+    html_tpl: &str,
+    text_tpl: &str,
+    payload: &serde_json::Value,
+) -> Result<RenderedTemplates, AppError> {
+    let sr = render_template(subject_tpl, payload);
+    let hr = render_html_template(html_tpl, payload);
+    let tr = render_template(text_tpl, payload);
+
+    match (sr, hr, tr) {
+        (Ok(s), Ok(h), Ok(t)) => Ok(RenderedTemplates {
+            subject: s,
+            body_html: h,
+            body_text: t,
+        }),
+        (sr, hr, tr) => {
+            if let Err(ref e) = sr {
+                warn!(component = "subject",   error = %e, "Template render failed");
+            }
+            if let Err(ref e) = hr {
+                warn!(component = "body_html", error = %e, "Template render failed");
+            }
+            if let Err(ref e) = tr {
+                warn!(component = "body_text", error = %e, "Template render failed");
+            }
+            // The arm fires only when at least one result is Err, so this
+            // chain always yields Some.
+            let first_err = sr
+                .err()
+                .or(hr.err())
+                .or(tr.err())
+                .expect("match arm requires at least one Err among (sr, hr, tr)");
+            Err(first_err)
+        }
+    }
+}
+
+pub(crate) struct SerializedEmailFields {
+    pub(crate) from_override: Option<serde_json::Value>,
+    pub(crate) attachments: Option<serde_json::Value>,
+    pub(crate) cc: Option<serde_json::Value>,
+    pub(crate) bcc: Option<serde_json::Value>,
+}
+
+/// Serialize the email-level fields that are stored in the `notification_log`
+/// row for idempotency and retry replay.
+///
+/// Returns `Err` (permanent) if any serialization fails — these are
+/// well-typed structs so a failure here indicates a field-change bug, not a
+/// transient condition.
+pub(crate) fn serialize_email_fields(
+    email_opts: &common::EmailOptions,
+    effective_cc: &[Recipient],
+    effective_bcc: &[Recipient],
+) -> Result<SerializedEmailFields, AppError> {
+    let from_override = email_opts
+        .from_override
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| {
+            AppError::permanent_mailer(format!("failed to serialize from_override: {e}"))
+        })?;
+
+    let attachments = if email_opts.attachments.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_value(&email_opts.attachments).map_err(|e| {
+            AppError::permanent_mailer(format!("failed to serialize attachments: {e}"))
+        })?)
+    };
+
+    let cc = serialize_recipient_list(effective_cc, "cc")?;
+    let bcc = serialize_recipient_list(effective_bcc, "bcc")?;
+
+    Ok(SerializedEmailFields {
+        from_override,
+        attachments,
+        cc,
+        bcc,
+    })
+}
+
+/// Build an [`EmailMessage`] from resolved templates, filtered recipients, and
+/// pre-fetched attachments.
+///
+/// `extra_recipients` is empty for individual mode and holds the secondary
+/// To: addresses (beyond the primary) for group mode.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_email_message(
+    event: &NotificationEvent,
+    primary: &Recipient,
+    extra_recipients: Vec<MailboxRef>,
+    rendered: RenderedTemplates,
+    from_override: (Option<String>, Option<String>),
+    attachments: &[ResolvedAttachment],
+    effective_cc: &[Recipient],
+    effective_bcc: &[Recipient],
+) -> EmailMessage {
+    EmailMessage {
+        event_id: event.event_id,
+        to_email: primary.email.clone(),
+        to_name: primary.name.clone(),
+        to_extra: extra_recipients,
+        subject: rendered.subject,
+        body_html: rendered.body_html,
+        body_text: rendered.body_text,
+        from_email_override: from_override.0,
+        from_name_override: from_override.1,
+        attachments: attachments.to_vec(),
+        cc: effective_cc
+            .iter()
+            .map(|r| MailboxRef {
+                email: r.email.clone(),
+                name: r.name.clone(),
+            })
+            .collect(),
+        bcc: effective_bcc
+            .iter()
+            .map(|r| MailboxRef {
+                email: r.email.clone(),
+                name: r.name.clone(),
+            })
+            .collect(),
     }
 }
 

@@ -23,6 +23,19 @@ use moka::future::Cache;
 use sqlx::PgPool;
 use tracing::{debug, info, instrument};
 
+/// Trait for resolving templates by (event_type, channel).
+///
+/// The consumer only needs the `resolve` method.  Extracting it into a trait
+/// allows mock implementations for unit testing without a live database.
+#[async_trait::async_trait]
+pub trait TemplateResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        event_type: &str,
+        channel: &str,
+    ) -> Result<NotificationTemplate, AppError>;
+}
+
 /// One template row from the `notification_template` table.
 #[derive(Debug, Clone)]
 pub struct NotificationTemplate {
@@ -344,5 +357,16 @@ impl TemplateStore {
         }
 
         Ok(row.map(|r| (r.version, r.active)))
+    }
+}
+
+#[async_trait::async_trait]
+impl TemplateResolver for TemplateStore {
+    async fn resolve(
+        &self,
+        event_type: &str,
+        channel: &str,
+    ) -> Result<NotificationTemplate, AppError> {
+        self.resolve(event_type, channel).await
     }
 }

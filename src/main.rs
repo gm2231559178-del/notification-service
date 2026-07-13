@@ -549,11 +549,11 @@ async fn main() -> anyhow::Result<()> {
     let consumer_task = tokio::spawn(async move {
         let ctx = ProcessorContext {
             store: Arc::new(store),
-            template_store,
+            template_store: Arc::new(template_store),
             sender,
             sender_registry,
             filter,
-            block_list_store,
+            block_list_store: Arc::new(block_list_store),
             rate_limiter,
         };
         if let Err(e) = run_consumer(consumer_cfg, ctx, consumer_http, consumer_shutdown).await {

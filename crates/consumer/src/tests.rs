@@ -17,6 +17,8 @@
 
 #[cfg(test)]
 mod processor_tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
     use std::sync::Mutex;
 
     use async_trait::async_trait;
@@ -50,6 +52,347 @@ mod processor_tests {
                 // the slice before calling `new()`, so the first element
                 // provided by the caller is consumed first.
                 .expect("MockSender: unexpected extra send() call")
+        }
+    }
+
+    #[allow(dead_code)]
+    fn mock_sender(outcomes: Vec<Result<(), AppError>>) -> MockSender {
+        MockSender {
+            outcomes: Mutex::new(outcomes.into_iter().rev().collect()),
+        }
+    }
+
+    // ── MockNotificationStore ──────────────────────────────────────────────────
+
+    use std::collections::HashMap;
+    use store::{EmailInsertPendingArgs, InsertResult, NotificationStore};
+
+    /// In-memory mock for [`NotificationStore`].
+    ///
+    /// Stores rows keyed by `(event_id, recipient_email)`.  Supports the
+    /// subset of the trait that `process_recipient` / `process_group` /
+    /// `execute_send` actually call.  Methods not exercised by the consumer
+    /// (`get_by_event_id`, `get_event_delivery_detail`, etc.) panic with
+    /// "not implemented" so accidental usage is caught immediately.
+    #[allow(dead_code)]
+    struct MockNotificationStore {
+        rows: Mutex<HashMap<(Uuid, String), MockRow>>,
+    }
+
+    #[allow(dead_code)]
+    struct MockRow {
+        status: String,
+        retry_count: i32,
+        error_msg: Option<String>,
+    }
+
+    #[allow(dead_code)]
+    impl MockNotificationStore {
+        fn new() -> Self {
+            Self {
+                rows: Mutex::new(HashMap::new()),
+            }
+        }
+
+        /// Check the final status of a recipient row (for assertions).
+        fn status_of(&self, event_id: Uuid, email: &str) -> Option<(String, i32)> {
+            let rows = self.rows.lock().unwrap();
+            rows.get(&(event_id, email.to_string()))
+                .map(|r| (r.status.clone(), r.retry_count))
+        }
+    }
+
+    #[async_trait]
+    impl NotificationStore for MockNotificationStore {
+        async fn insert_pending(
+            &self,
+            args: &EmailInsertPendingArgs<'_>,
+        ) -> Result<InsertResult, AppError> {
+            let mut rows = self.rows.lock().unwrap();
+            let key = (args.event_id, args.recipient_email.to_string());
+            match rows.get_mut(&key) {
+                Some(existing) => {
+                    // Duplicate — return current state without overwriting.
+                    Ok(InsertResult::Duplicate {
+                        retry_count: existing.retry_count,
+                        status: existing.status.clone(),
+                    })
+                }
+                None => {
+                    rows.insert(
+                        key,
+                        MockRow {
+                            status: "PENDING".into(),
+                            retry_count: 0,
+                            error_msg: None,
+                        },
+                    );
+                    Ok(InsertResult::Inserted)
+                }
+            }
+        }
+
+        // insert_pending_batch uses the default trait impl (sequential insert_pending).
+
+        async fn mark_sent(&self, event_id: Uuid, recipient_id: &str) -> Result<(), AppError> {
+            let mut rows = self.rows.lock().unwrap();
+            let key = (event_id, recipient_id.to_string());
+            if let Some(row) = rows.get_mut(&key) {
+                row.status = "SENT".into();
+            }
+            Ok(())
+        }
+
+        async fn mark_failed(
+            &self,
+            event_id: Uuid,
+            recipient_id: &str,
+            error_msg: &str,
+            exhausted: bool,
+        ) -> Result<(), AppError> {
+            let mut rows = self.rows.lock().unwrap();
+            let key = (event_id, recipient_id.to_string());
+            if let Some(row) = rows.get_mut(&key) {
+                row.retry_count += 1;
+                row.error_msg = Some(error_msg.to_string());
+                if exhausted {
+                    row.status = "FAILED".into();
+                }
+                // else stays PENDING
+            }
+            Ok(())
+        }
+
+        async fn mark_blocked(
+            &self,
+            event_id: Uuid,
+            recipient_id: &str,
+            _reason: &str,
+        ) -> Result<(), AppError> {
+            let mut rows = self.rows.lock().unwrap();
+            let key = (event_id, recipient_id.to_string());
+            if let Some(row) = rows.get_mut(&key) {
+                row.status = "BLOCKED".into();
+            }
+            Ok(())
+        }
+
+        async fn mark_skipped(
+            &self,
+            event_id: Uuid,
+            _event_type: &str,
+            recipient_id: &str,
+            _reason: &str,
+            _event_timestamp: chrono::DateTime<chrono::Utc>,
+            _payload: &serde_json::Value,
+        ) -> Result<(), AppError> {
+            let mut rows = self.rows.lock().unwrap();
+            let key = (event_id, recipient_id.to_string());
+            rows.insert(
+                key,
+                MockRow {
+                    status: "SKIPPED".into(),
+                    retry_count: 0,
+                    error_msg: None,
+                },
+            );
+            Ok(())
+        }
+
+        async fn get_by_event_and_recipient(
+            &self,
+            event_id: Uuid,
+            recipient_id: &str,
+        ) -> Result<common::NotificationLog, AppError> {
+            let rows = self.rows.lock().unwrap();
+            let key = (event_id, recipient_id.to_string());
+            match rows.get(&key) {
+                Some(row) => Ok(common::NotificationLog {
+                    id: Uuid::new_v4(),
+                    event_id,
+                    event_type: String::new(),
+                    channel: "email".into(),
+                    status: common::NotificationStatus::try_from(row.status.as_str())
+                        .unwrap_or(common::NotificationStatus::Pending),
+                    retry_count: row.retry_count,
+                    total_attempts: row.retry_count,
+                    last_error: row.error_msg.clone(),
+                    payload: None,
+                    event_timestamp: None,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    recipient_email: recipient_id.to_string(),
+                    recipient_name: None,
+                    from_override: None,
+                    sender_account: None,
+                    send_mode: None,
+                    group_retry_mode: None,
+                    attachments: None,
+                    cc: None,
+                    bcc: None,
+                    to_recipients: None,
+                }),
+                None => Err(AppError::NotFound(format!(
+                    "row not found for {event_id}/{recipient_id}"
+                ))),
+            }
+        }
+
+        async fn reap_stale_pending(&self, _timeout_secs: u64) -> Result<Vec<Uuid>, AppError> {
+            unimplemented!("not needed for consumer unit tests")
+        }
+
+        async fn get_by_event_id(
+            &self,
+            _event_id: Uuid,
+        ) -> Result<Vec<common::NotificationLog>, AppError> {
+            unimplemented!("not needed for consumer unit tests")
+        }
+
+        async fn get_recipients_for_event(
+            &self,
+            _event_id: Uuid,
+            _only_emails: Option<&[String]>,
+        ) -> Result<Vec<common::NotificationLog>, AppError> {
+            unimplemented!("not needed for consumer unit tests")
+        }
+
+        async fn get_event_delivery_detail(
+            &self,
+            _event_id: Uuid,
+        ) -> Result<store::EventDeliveryDetail, AppError> {
+            unimplemented!("not needed for consumer unit tests")
+        }
+
+        async fn reset_for_retry(
+            &self,
+            _event_id: Uuid,
+            _recipient_id: &str,
+        ) -> Result<(), AppError> {
+            unimplemented!("not needed for consumer unit tests")
+        }
+
+        async fn reset_all_failed_for_event(
+            &self,
+            _event_id: Uuid,
+        ) -> Result<Vec<String>, AppError> {
+            unimplemented!("not needed for consumer unit tests")
+        }
+
+        fn pool(&self) -> &sqlx::PgPool {
+            unimplemented!("not needed for consumer unit tests")
+        }
+    }
+
+    // ── MockTemplateResolver ───────────────────────────────────────────────────
+
+    use store::TemplateResolver;
+
+    /// In-memory mock for [`TemplateResolver`].
+    ///
+    /// Returns pre-configured templates keyed by event type, or
+    /// `AppError::Template` for unknown event types.
+    #[allow(dead_code)]
+    struct MockTemplateResolver {
+        templates: Mutex<HashMap<String, store::NotificationTemplate>>,
+    }
+
+    #[allow(dead_code)]
+    impl MockTemplateResolver {
+        fn new() -> Self {
+            Self {
+                templates: Mutex::new(HashMap::new()),
+            }
+        }
+
+        /// Register a template for an event type.
+        fn register(&self, event_type: &str, subject: &str, body_html: &str, body_text: &str) {
+            self.templates.lock().unwrap().insert(
+                event_type.to_string(),
+                store::NotificationTemplate {
+                    subject: subject.to_string(),
+                    body_html: body_html.to_string(),
+                    body_text: body_text.to_string(),
+                },
+            );
+        }
+    }
+
+    #[async_trait]
+    impl TemplateResolver for MockTemplateResolver {
+        async fn resolve(
+            &self,
+            event_type: &str,
+            _channel: &str,
+        ) -> Result<store::NotificationTemplate, AppError> {
+            self.templates
+                .lock()
+                .unwrap()
+                .get(event_type)
+                .cloned()
+                .ok_or_else(|| AppError::Template(format!("Unknown event type '{event_type}'")))
+        }
+    }
+
+    // ── MockBlockListChecker ──────────────────────────────────────────────────
+
+    use store::BlockListChecker;
+
+    /// In-memory mock for [`BlockListChecker`].
+    ///
+    /// Returns `Ok(())` by default.  Emails added via `block()` cause
+    /// `check()` to return `Err(AppError::Blocked)`.
+    #[allow(dead_code)]
+    struct MockBlockListChecker {
+        blocked: Mutex<HashSet<String>>,
+    }
+
+    #[allow(dead_code)]
+    impl MockBlockListChecker {
+        fn new() -> Self {
+            Self {
+                blocked: Mutex::new(HashSet::new()),
+            }
+        }
+
+        fn block(&self, email: &str) {
+            self.blocked.lock().unwrap().insert(email.to_lowercase());
+        }
+    }
+
+    #[async_trait]
+    impl BlockListChecker for MockBlockListChecker {
+        async fn check(&self, email: &str) -> Result<(), AppError> {
+            if self.blocked.lock().unwrap().contains(&email.to_lowercase()) {
+                return Err(AppError::Blocked(format!("{email} is on the blocklist")));
+            }
+            Ok(())
+        }
+    }
+
+    /// Build a `ProcessorContext` suitable for unit tests, wiring a mock
+    /// template resolver, mock store, and mock sender.  The filter and
+    /// block_list_store are set to pass-through (no blocking rules).
+    #[allow(dead_code)]
+    fn build_test_context(
+        mock_store: Arc<MockNotificationStore>,
+        mock_sender: Arc<dyn EmailSender>,
+        template_resolver: Arc<dyn TemplateResolver>,
+    ) -> crate::ProcessorContext {
+        use rate_limiter::{MailRateLimiter, RateLimitConfig};
+        use recipient_filter::{FilterConfig, RecipientFilter};
+
+        crate::ProcessorContext {
+            store: mock_store,
+            template_store: template_resolver,
+            sender: mock_sender,
+            sender_registry: mailer::SenderRegistry::new(),
+            filter: RecipientFilter::new(FilterConfig::default()),
+            block_list_store: Arc::new(MockBlockListChecker::new()),
+            rate_limiter: MailRateLimiter::new(RateLimitConfig {
+                emails_per_second: 0,
+                burst_size: 0,
+            }),
         }
     }
 
@@ -1186,5 +1529,1186 @@ mod processor_tests {
             to_send[0].email, "primary@example.com",
             "primary must always survive the partial-send strip"
         );
+    }
+
+    // ── render_all_templates tests ─────────────────────────────────────────────
+
+    #[test]
+    fn render_all_templates_success() {
+        use crate::processor::render_all_templates;
+
+        let payload = json!({ "name": "Alice", "orderId": "42" });
+        let result = render_all_templates(
+            "Hello {{ name }}",
+            "<h1>Hello {{ name }}</h1>",
+            "Hello {{ name }}",
+            &payload,
+        );
+        let rendered = result.unwrap();
+        assert_eq!(rendered.subject, "Hello Alice");
+        assert_eq!(rendered.body_html, "<h1>Hello Alice</h1>");
+        assert_eq!(rendered.body_text, "Hello Alice");
+    }
+
+    #[test]
+    fn render_all_templates_invalid_template_returns_error() {
+        use crate::processor::render_all_templates;
+
+        let payload = json!({});
+        let result = render_all_templates("Unclosed {{ name", "<p>body</p>", "text", &payload);
+        assert!(result.is_err(), "broken template must return Err");
+    }
+
+    #[test]
+    fn render_all_templates_html_xss_escaping() {
+        use crate::processor::render_all_templates;
+
+        let payload = json!({ "name": "<script>alert(1)</script>" });
+        let result = render_all_templates("{{ name }}", "{{ name }}", "{{ name }}", &payload);
+        let rendered = result.unwrap();
+        assert_eq!(rendered.subject, "<script>alert(1)</script>");
+        // HTML template auto-escapes <, >, ", &
+        assert!(rendered.body_html.contains("&lt;script&gt;"));
+        // Text template does NOT escape
+        assert_eq!(rendered.body_text, "<script>alert(1)</script>");
+    }
+
+    #[test]
+    fn render_all_templates_undefined_variable_returns_error() {
+        use crate::processor::render_all_templates;
+
+        let payload = json!({});
+        let result = render_all_templates("Hello {{ missing }}", "<p>body</p>", "text", &payload);
+        // minijinja returns an error for undefined variables by default
+        assert!(result.is_err(), "undefined variable must return Err");
+    }
+
+    // ── serialize_email_fields tests ───────────────────────────────────────────
+
+    #[test]
+    fn serialize_email_fields_empty() {
+        use crate::processor::serialize_email_fields;
+
+        let opts = common::EmailOptions {
+            recipients: vec![],
+            cc: vec![],
+            bcc: vec![],
+            from_override: None,
+            attachments: vec![],
+            sender_account: None,
+            send_mode: common::SendMode::Individual,
+            group_retry_mode: common::GroupRetryMode::Individual,
+            retry_policy: common::RetryPolicy::Retry,
+            send_at: None,
+            priority: None,
+        };
+        let fields = serialize_email_fields(&opts, &[], &[]).unwrap();
+        assert!(fields.from_override.is_none());
+        assert!(fields.attachments.is_none());
+        assert!(fields.cc.is_none());
+        assert!(fields.bcc.is_none());
+    }
+
+    #[test]
+    fn serialize_email_fields_with_from_override() {
+        use crate::processor::serialize_email_fields;
+        use common::FromOverride;
+
+        let opts = common::EmailOptions {
+            recipients: vec![],
+            cc: vec![],
+            bcc: vec![],
+            from_override: Some(FromOverride {
+                email: "sender@example.com".into(),
+                name: Some("Sender".into()),
+            }),
+            attachments: vec![],
+            sender_account: None,
+            send_mode: common::SendMode::Individual,
+            group_retry_mode: common::GroupRetryMode::Individual,
+            retry_policy: common::RetryPolicy::Retry,
+            send_at: None,
+            priority: None,
+        };
+        let fields = serialize_email_fields(&opts, &[], &[]).unwrap();
+        let from = fields.from_override.unwrap();
+        assert_eq!(from["email"], "sender@example.com");
+        assert_eq!(from["name"], "Sender");
+    }
+
+    #[test]
+    fn serialize_email_fields_with_cc_bcc() {
+        use crate::processor::serialize_email_fields;
+
+        let opts = common::EmailOptions {
+            recipients: vec![],
+            cc: vec![Recipient {
+                email: "cc@example.com".into(),
+                name: Some("CC User".into()),
+            }],
+            bcc: vec![Recipient {
+                email: "bcc@example.com".into(),
+                name: None,
+            }],
+            from_override: None,
+            attachments: vec![],
+            sender_account: None,
+            send_mode: common::SendMode::Individual,
+            group_retry_mode: common::GroupRetryMode::Individual,
+            retry_policy: common::RetryPolicy::Retry,
+            send_at: None,
+            priority: None,
+        };
+        let cc = vec![Recipient {
+            email: "cc@example.com".into(),
+            name: Some("CC User".into()),
+        }];
+        let bcc = vec![Recipient {
+            email: "bcc@example.com".into(),
+            name: None,
+        }];
+        let fields = serialize_email_fields(&opts, &cc, &bcc).unwrap();
+        let cc_val = fields.cc.unwrap();
+        assert_eq!(cc_val[0]["email"], "cc@example.com");
+        let bcc_val = fields.bcc.unwrap();
+        assert_eq!(bcc_val[0]["email"], "bcc@example.com");
+    }
+
+    // ── build_email_message tests ──────────────────────────────────────────────
+
+    #[test]
+    fn build_email_message_individual() {
+        use crate::processor::{build_email_message, RenderedTemplates};
+
+        let event = NotificationEvent {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            event_type: "ORDER_CONFIRMATION".into(),
+            payload: json!({}),
+            metadata: Default::default(),
+            channel_overrides: ChannelOverrides { email: None },
+        };
+        let primary = Recipient {
+            email: "to@example.com".into(),
+            name: Some("To User".into()),
+        };
+        let rendered = RenderedTemplates {
+            subject: "Test Subject".into(),
+            body_html: "<p>HTML</p>".into(),
+            body_text: "Text".into(),
+        };
+        let msg = build_email_message(
+            &event,
+            &primary,
+            vec![], // individual mode
+            rendered,
+            (Some("from@example.com".into()), Some("From Name".into())),
+            &[],
+            &[Recipient {
+                email: "cc@example.com".into(),
+                name: None,
+            }],
+            &[],
+        );
+        assert_eq!(msg.to_email, "to@example.com");
+        assert_eq!(msg.to_name.as_deref(), Some("To User"));
+        assert!(msg.to_extra.is_empty());
+        assert_eq!(msg.subject, "Test Subject");
+        assert_eq!(msg.from_email_override.as_deref(), Some("from@example.com"));
+        assert_eq!(msg.cc.len(), 1);
+        assert_eq!(msg.cc[0].email, "cc@example.com");
+        assert!(msg.bcc.is_empty());
+    }
+
+    #[test]
+    fn build_email_message_group() {
+        use crate::processor::{build_email_message, RenderedTemplates};
+        use mailer::MailboxRef;
+
+        let event = NotificationEvent {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            event_type: "ORDER_CONFIRMATION".into(),
+            payload: json!({}),
+            metadata: Default::default(),
+            channel_overrides: ChannelOverrides { email: None },
+        };
+        let primary = Recipient {
+            email: "primary@example.com".into(),
+            name: None,
+        };
+        let extra = vec![
+            MailboxRef {
+                email: "second@example.com".into(),
+                name: None,
+            },
+            MailboxRef {
+                email: "third@example.com".into(),
+                name: None,
+            },
+        ];
+        let rendered = RenderedTemplates {
+            subject: "Group Subject".into(),
+            body_html: "<p>HTML</p>".into(),
+            body_text: "Text".into(),
+        };
+        let msg = build_email_message(
+            &event,
+            &primary,
+            extra,
+            rendered,
+            (None, None),
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(msg.to_email, "primary@example.com");
+        assert_eq!(msg.to_extra.len(), 2);
+        assert_eq!(msg.to_extra[0].email, "second@example.com");
+        assert_eq!(msg.to_extra[1].email, "third@example.com");
+        assert!(msg.from_email_override.is_none());
+    }
+
+    // ── MockNotificationStore basic tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn mock_store_insert_pending_returns_inserted() {
+        let store = MockNotificationStore::new();
+        let event_id = Uuid::new_v4();
+        let args = EmailInsertPendingArgs {
+            event_id,
+            event_type: "ORDER_CONFIRMATION",
+            recipient_email: "test@example.com",
+            payload: &json!({}),
+            event_timestamp: Utc::now(),
+            recipient_name: None,
+            from_override: None,
+            attachments: None,
+            sender_account: None,
+            cc: None,
+            bcc: None,
+            send_mode: "individual",
+            group_retry_mode: None,
+            to_recipients: None,
+        };
+        let result = store.insert_pending(&args).await.unwrap();
+        assert!(matches!(result, InsertResult::Inserted));
+    }
+
+    #[tokio::test]
+    async fn mock_store_insert_pending_returns_duplicate_on_second_call() {
+        let store = MockNotificationStore::new();
+        let event_id = Uuid::new_v4();
+        let args = EmailInsertPendingArgs {
+            event_id,
+            event_type: "ORDER_CONFIRMATION",
+            recipient_email: "test@example.com",
+            payload: &json!({}),
+            event_timestamp: Utc::now(),
+            recipient_name: None,
+            from_override: None,
+            attachments: None,
+            sender_account: None,
+            cc: None,
+            bcc: None,
+            send_mode: "individual",
+            group_retry_mode: None,
+            to_recipients: None,
+        };
+        let r1 = store.insert_pending(&args).await.unwrap();
+        assert!(matches!(r1, InsertResult::Inserted));
+
+        let r2 = store.insert_pending(&args).await.unwrap();
+        match r2 {
+            InsertResult::Duplicate {
+                retry_count,
+                status,
+            } => {
+                assert_eq!(retry_count, 0);
+                assert_eq!(status, "PENDING");
+            }
+            _ => panic!("expected Duplicate"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_store_mark_sent_sets_status() {
+        let store = MockNotificationStore::new();
+        let event_id = Uuid::new_v4();
+        let args = EmailInsertPendingArgs {
+            event_id,
+            event_type: "ORDER_CONFIRMATION",
+            recipient_email: "test@example.com",
+            payload: &json!({}),
+            event_timestamp: Utc::now(),
+            recipient_name: None,
+            from_override: None,
+            attachments: None,
+            sender_account: None,
+            cc: None,
+            bcc: None,
+            send_mode: "individual",
+            group_retry_mode: None,
+            to_recipients: None,
+        };
+        store.insert_pending(&args).await.unwrap();
+        store.mark_sent(event_id, "test@example.com").await.unwrap();
+
+        let (status, _) = store.status_of(event_id, "test@example.com").unwrap();
+        assert_eq!(status, "SENT");
+    }
+
+    #[tokio::test]
+    async fn mock_store_mark_failed_exhausted_sets_status() {
+        let store = MockNotificationStore::new();
+        let event_id = Uuid::new_v4();
+        let args = EmailInsertPendingArgs {
+            event_id,
+            event_type: "ORDER_CONFIRMATION",
+            recipient_email: "test@example.com",
+            payload: &json!({}),
+            event_timestamp: Utc::now(),
+            recipient_name: None,
+            from_override: None,
+            attachments: None,
+            sender_account: None,
+            cc: None,
+            bcc: None,
+            send_mode: "individual",
+            group_retry_mode: None,
+            to_recipients: None,
+        };
+        store.insert_pending(&args).await.unwrap();
+        store
+            .mark_failed(event_id, "test@example.com", "smtp timeout", true)
+            .await
+            .unwrap();
+
+        let (status, retry_count) = store.status_of(event_id, "test@example.com").unwrap();
+        assert_eq!(status, "FAILED");
+        assert_eq!(retry_count, 1); // incremented once
+    }
+
+    #[tokio::test]
+    async fn mock_store_mark_failed_not_exhausted_keeps_pending() {
+        let store = MockNotificationStore::new();
+        let event_id = Uuid::new_v4();
+        let args = EmailInsertPendingArgs {
+            event_id,
+            event_type: "ORDER_CONFIRMATION",
+            recipient_email: "test@example.com",
+            payload: &json!({}),
+            event_timestamp: Utc::now(),
+            recipient_name: None,
+            from_override: None,
+            attachments: None,
+            sender_account: None,
+            cc: None,
+            bcc: None,
+            send_mode: "individual",
+            group_retry_mode: None,
+            to_recipients: None,
+        };
+        store.insert_pending(&args).await.unwrap();
+        store
+            .mark_failed(event_id, "test@example.com", "smtp timeout", false)
+            .await
+            .unwrap();
+
+        let (status, retry_count) = store.status_of(event_id, "test@example.com").unwrap();
+        assert_eq!(status, "PENDING"); // stays PENDING when not exhausted
+        assert_eq!(retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn mock_store_mark_blocked_sets_status() {
+        let store = MockNotificationStore::new();
+        let event_id = Uuid::new_v4();
+        let args = EmailInsertPendingArgs {
+            event_id,
+            event_type: "ORDER_CONFIRMATION",
+            recipient_email: "test@example.com",
+            payload: &json!({}),
+            event_timestamp: Utc::now(),
+            recipient_name: None,
+            from_override: None,
+            attachments: None,
+            sender_account: None,
+            cc: None,
+            bcc: None,
+            send_mode: "individual",
+            group_retry_mode: None,
+            to_recipients: None,
+        };
+        store.insert_pending(&args).await.unwrap();
+        store
+            .mark_blocked(event_id, "test@example.com", "domain blocked")
+            .await
+            .unwrap();
+
+        let (status, _) = store.status_of(event_id, "test@example.com").unwrap();
+        assert_eq!(status, "BLOCKED");
+    }
+
+    #[tokio::test]
+    async fn mock_store_insert_pending_batch() {
+        let store = MockNotificationStore::new();
+        let event_id = Uuid::new_v4();
+        let payload = json!({});
+        let args: Vec<_> = ["a@example.com", "b@example.com", "c@example.com"]
+            .iter()
+            .map(|email| EmailInsertPendingArgs {
+                event_id,
+                event_type: "ORDER_CONFIRMATION",
+                recipient_email: email,
+                payload: &payload,
+                event_timestamp: Utc::now(),
+                recipient_name: None,
+                from_override: None,
+                attachments: None,
+                sender_account: None,
+                cc: None,
+                bcc: None,
+                send_mode: "group",
+                group_retry_mode: Some("individual"),
+                to_recipients: None,
+            })
+            .collect();
+
+        let results = store.insert_pending_batch(&args).await.unwrap();
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|r| matches!(r, InsertResult::Inserted)));
+
+        // Second batch: all duplicates
+        let results2 = store.insert_pending_batch(&args).await.unwrap();
+        assert_eq!(results2.len(), 3);
+        assert!(results2
+            .iter()
+            .all(|r| matches!(r, InsertResult::Duplicate { .. })));
+    }
+
+    // ── resolve_sender tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_sender_no_account_returns_global() {
+        use crate::processor::resolve_sender;
+        use mailer::SenderRegistry;
+
+        let registry = SenderRegistry::new();
+        let global = mock_sender(vec![Ok(())]);
+        let global: Arc<dyn EmailSender> = Arc::new(global);
+
+        let resolved = resolve_sender(&registry, &global, None, "ORDER_CONFIRMATION");
+        // Same Arc as global — pointer equality
+        assert!(Arc::ptr_eq(&resolved, &global));
+    }
+
+    #[test]
+    fn resolve_sender_known_account_returns_named_sender() {
+        use crate::processor::resolve_sender;
+        use mailer::SenderRegistry;
+
+        let mut registry = SenderRegistry::new();
+        let named = mock_sender(vec![Ok(())]);
+        let named_arc: Arc<dyn EmailSender> = Arc::new(named);
+        registry.register("business-a", named_arc.clone());
+
+        let global = mock_sender(vec![Ok(())]);
+        let global: Arc<dyn EmailSender> = Arc::new(global);
+
+        let resolved = resolve_sender(&registry, &global, Some("business-a"), "ORDER_CONFIRMATION");
+        assert!(Arc::ptr_eq(&resolved, &named_arc));
+    }
+
+    #[test]
+    fn resolve_sender_unknown_account_falls_back_to_global() {
+        use crate::processor::resolve_sender;
+        use mailer::SenderRegistry;
+
+        let registry = SenderRegistry::new();
+        let global = mock_sender(vec![Ok(())]);
+        let global: Arc<dyn EmailSender> = Arc::new(global);
+
+        let resolved = resolve_sender(
+            &registry,
+            &global,
+            Some("nonexistent"),
+            "ORDER_CONFIRMATION",
+        );
+        assert!(Arc::ptr_eq(&resolved, &global));
+    }
+
+    // ── mark_sent_for_targets tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mark_sent_individual_sets_status() {
+        use crate::processor::{mark_sent_for_targets, SendTargets};
+
+        let store = Arc::new(MockNotificationStore::new());
+        let event_id = Uuid::new_v4();
+
+        let args = EmailInsertPendingArgs {
+            event_id,
+            event_type: "ORDER_CONFIRMATION",
+            recipient_email: "test@example.com",
+            payload: &json!({}),
+            event_timestamp: Utc::now(),
+            recipient_name: None,
+            from_override: None,
+            attachments: None,
+            sender_account: None,
+            cc: None,
+            bcc: None,
+            send_mode: "individual",
+            group_retry_mode: None,
+            to_recipients: None,
+        };
+        store.insert_pending(&args).await.unwrap();
+
+        // Arc<MockNotificationStore> coerces to Arc<dyn NotificationStore>
+        let store_dyn: Arc<dyn NotificationStore> = store.clone();
+        let targets = SendTargets::Individual {
+            event_id,
+            email: "test@example.com",
+        };
+        mark_sent_for_targets(&store_dyn, &targets, "ORDER_CONFIRMATION").await;
+
+        let (status, _) = store.status_of(event_id, "test@example.com").unwrap();
+        assert_eq!(status, "SENT");
+    }
+
+    #[tokio::test]
+    async fn mark_sent_group_marks_primary_and_secondaries() {
+        use crate::processor::{mark_sent_for_targets, SendTargets};
+        use common::GroupRetryMode;
+
+        let store = Arc::new(MockNotificationStore::new());
+        let event_id = Uuid::new_v4();
+
+        for email in &[
+            "primary@example.com",
+            "second-a@example.com",
+            "second-b@example.com",
+        ] {
+            let args = EmailInsertPendingArgs {
+                event_id,
+                event_type: "ORDER_CONFIRMATION",
+                recipient_email: email,
+                payload: &json!({}),
+                event_timestamp: Utc::now(),
+                recipient_name: None,
+                from_override: None,
+                attachments: None,
+                sender_account: None,
+                cc: None,
+                bcc: None,
+                send_mode: "group",
+                group_retry_mode: Some("individual"),
+                to_recipients: None,
+            };
+            store.insert_pending(&args).await.unwrap();
+        }
+
+        let store_dyn: Arc<dyn NotificationStore> = store.clone();
+        let targets = SendTargets::Group {
+            event_id,
+            primary_email: "primary@example.com",
+            secondaries: vec!["second-a@example.com", "second-b@example.com"],
+            retry_mode: &GroupRetryMode::Individual,
+            to_count: 3,
+        };
+        mark_sent_for_targets(&store_dyn, &targets, "ORDER_CONFIRMATION").await;
+
+        let (s1, _) = store.status_of(event_id, "primary@example.com").unwrap();
+        let (s2, _) = store.status_of(event_id, "second-a@example.com").unwrap();
+        let (s3, _) = store.status_of(event_id, "second-b@example.com").unwrap();
+        assert_eq!(s1, "SENT");
+        assert_eq!(s2, "SENT");
+        assert_eq!(s3, "SENT");
+    }
+
+    #[tokio::test]
+    async fn mark_sent_group_no_secondaries_when_empty() {
+        use crate::processor::{mark_sent_for_targets, SendTargets};
+        use common::GroupRetryMode;
+
+        let store = Arc::new(MockNotificationStore::new());
+        let event_id = Uuid::new_v4();
+
+        let args = EmailInsertPendingArgs {
+            event_id,
+            event_type: "ORDER_CONFIRMATION",
+            recipient_email: "primary@example.com",
+            payload: &json!({}),
+            event_timestamp: Utc::now(),
+            recipient_name: None,
+            from_override: None,
+            attachments: None,
+            sender_account: None,
+            cc: None,
+            bcc: None,
+            send_mode: "group",
+            group_retry_mode: Some("whole"),
+            to_recipients: None,
+        };
+        store.insert_pending(&args).await.unwrap();
+
+        let store_dyn: Arc<dyn NotificationStore> = store.clone();
+        let targets = SendTargets::Group {
+            event_id,
+            primary_email: "primary@example.com",
+            secondaries: vec![],
+            retry_mode: &GroupRetryMode::Whole,
+            to_count: 1,
+        };
+        mark_sent_for_targets(&store_dyn, &targets, "ORDER_CONFIRMATION").await;
+
+        let (status, _) = store.status_of(event_id, "primary@example.com").unwrap();
+        assert_eq!(status, "SENT");
+    }
+
+    // ── process_recipient integration tests ────────────────────────────────────
+
+    use crate::processor::{process_group, process_recipient, EffectiveCcBcc, RecipientOutcome};
+    use tokio_util::sync::CancellationToken;
+
+    /// Build a minimal `NotificationEvent` + `EmailOptions` for individual-mode tests.
+    fn make_individual_test_data(email: &str) -> (NotificationEvent, common::EmailOptions) {
+        let event = make_event_with_cc_bcc(email, vec![], vec![]);
+        let opts = event.channel_overrides.email.clone().unwrap();
+        (event, opts)
+    }
+
+    #[tokio::test]
+    async fn process_recipient_happy_path() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+        let sender = Arc::new(mock_sender(vec![Ok(())]));
+
+        let ctx = build_test_context(store.clone(), sender, resolver);
+        let (event, opts) = make_individual_test_data("ok@example.com");
+        let recipient = &opts.recipients[0];
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        let outcome = process_recipient(
+            &ctx,
+            &event,
+            &opts,
+            recipient,
+            &[],
+            &empty_cc_bcc,
+            &shutdown,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, RecipientOutcome::Sent),
+            "expected Sent, got {outcome:?}"
+        );
+        let (status, _) = store.status_of(event.event_id, "ok@example.com").unwrap();
+        assert_eq!(status, "SENT");
+    }
+
+    #[tokio::test]
+    async fn process_recipient_template_error_no_db_row() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        // Don't register "ORDER_CONFIRMATION" → resolve() fails
+        let sender = Arc::new(mock_sender(vec![]));
+
+        let ctx = build_test_context(store.clone(), sender, resolver);
+        let (event, opts) = make_individual_test_data("ok@example.com");
+        let recipient = &opts.recipients[0];
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        let outcome = process_recipient(
+            &ctx,
+            &event,
+            &opts,
+            recipient,
+            &[],
+            &empty_cc_bcc,
+            &shutdown,
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, RecipientOutcome::Failed(_)),
+            "expected Failed, got {outcome:?}"
+        );
+        // No DB row should have been created — insert_pending was never called.
+        assert!(
+            store.status_of(event.event_id, "ok@example.com").is_none(),
+            "no DB row should exist when template lookup fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_recipient_duplicate_already_sent_skipped() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+        let sender = Arc::new(mock_sender(vec![]));
+
+        let ctx = build_test_context(store.clone(), sender, resolver);
+        let (event, opts) = make_individual_test_data("dup@example.com");
+        let recipient = &opts.recipients[0];
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        // Insert a pending row, then mark it as SENT to simulate a prior delivery.
+        store
+            .insert_pending(&EmailInsertPendingArgs {
+                event_id: event.event_id,
+                event_type: "ORDER_CONFIRMATION",
+                recipient_email: "dup@example.com",
+                recipient_name: None,
+                payload: &json!({}),
+                event_timestamp: event.timestamp,
+                from_override: None,
+                attachments: None,
+                sender_account: None,
+                cc: None,
+                bcc: None,
+                send_mode: "individual",
+                group_retry_mode: None,
+                to_recipients: None,
+            })
+            .await
+            .unwrap();
+        store
+            .mark_sent(event.event_id, "dup@example.com")
+            .await
+            .unwrap();
+
+        let outcome = process_recipient(
+            &ctx,
+            &event,
+            &opts,
+            recipient,
+            &[],
+            &empty_cc_bcc,
+            &shutdown,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, RecipientOutcome::Skipped),
+            "expected Skipped, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_recipient_duplicate_pending_returns_retry_count() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+        let sender = Arc::new(mock_sender(vec![]));
+
+        let ctx = build_test_context(store.clone(), sender, resolver);
+        let (event, opts) = make_individual_test_data("dup@example.com");
+        let recipient = &opts.recipients[0];
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        // Insert a pending row directly (simulates a prior incomplete attempt).
+        // Then call process_recipient — it finds Duplicate with PENDING status.
+        store
+            .insert_pending(&EmailInsertPendingArgs {
+                event_id: event.event_id,
+                event_type: "ORDER_CONFIRMATION",
+                recipient_email: "dup@example.com",
+                recipient_name: None,
+                payload: &json!({}),
+                event_timestamp: event.timestamp,
+                from_override: None,
+                attachments: None,
+                sender_account: None,
+                cc: None,
+                bcc: None,
+                send_mode: "individual",
+                group_retry_mode: None,
+                to_recipients: None,
+            })
+            .await
+            .unwrap();
+
+        let outcome = process_recipient(
+            &ctx,
+            &event,
+            &opts,
+            recipient,
+            &[],
+            &empty_cc_bcc,
+            &shutdown,
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, RecipientOutcome::Duplicate { retry_count: 0 }),
+            "expected Duplicate {{ retry_count: 0 }}, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_recipient_db_block_list_blocks() {
+        use rate_limiter::{MailRateLimiter, RateLimitConfig};
+        use recipient_filter::{FilterConfig, RecipientFilter};
+
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+
+        let blc = Arc::new(MockBlockListChecker::new());
+        blc.block("blocked@example.com");
+
+        let ctx = crate::ProcessorContext {
+            store: store.clone(),
+            template_store: resolver,
+            sender: Arc::new(mock_sender(vec![])),
+            sender_registry: mailer::SenderRegistry::new(),
+            filter: RecipientFilter::new(FilterConfig::default()),
+            block_list_store: blc,
+            rate_limiter: MailRateLimiter::new(RateLimitConfig {
+                emails_per_second: 0,
+                burst_size: 0,
+            }),
+        };
+
+        let (event, opts) = make_individual_test_data("blocked@example.com");
+        let recipient = &opts.recipients[0];
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        let outcome = process_recipient(
+            &ctx,
+            &event,
+            &opts,
+            recipient,
+            &[],
+            &empty_cc_bcc,
+            &shutdown,
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, RecipientOutcome::Blocked(_)),
+            "expected Blocked, got {outcome:?}"
+        );
+        let (status, _) = store
+            .status_of(event.event_id, "blocked@example.com")
+            .unwrap();
+        assert_eq!(status, "BLOCKED");
+    }
+
+    #[tokio::test]
+    async fn process_recipient_config_filter_blocks() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+
+        // Build context with a filter that blocks the recipient
+        use rate_limiter::{MailRateLimiter, RateLimitConfig};
+        use recipient_filter::{FilterConfig, RecipientFilter};
+        let ctx = crate::ProcessorContext {
+            store: store.clone(),
+            template_store: resolver,
+            sender: Arc::new(mock_sender(vec![])),
+            sender_registry: mailer::SenderRegistry::new(),
+            filter: RecipientFilter::new(FilterConfig {
+                blocked_emails: vec!["filtered@example.com".into()],
+                ..Default::default()
+            }),
+            block_list_store: Arc::new(MockBlockListChecker::new()),
+            rate_limiter: MailRateLimiter::new(RateLimitConfig {
+                emails_per_second: 0,
+                burst_size: 0,
+            }),
+        };
+
+        let (event, opts) = make_individual_test_data("filtered@example.com");
+        let recipient = &opts.recipients[0];
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        let outcome = process_recipient(
+            &ctx,
+            &event,
+            &opts,
+            recipient,
+            &[],
+            &empty_cc_bcc,
+            &shutdown,
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, RecipientOutcome::Blocked(_)),
+            "expected Blocked, got {outcome:?}"
+        );
+        let (status, _) = store
+            .status_of(event.event_id, "filtered@example.com")
+            .unwrap();
+        assert_eq!(status, "BLOCKED");
+    }
+
+    #[tokio::test]
+    async fn process_recipient_send_transient_failure() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+        let sender = Arc::new(mock_sender(vec![Err(AppError::transient_mailer(
+            "timeout",
+        ))]));
+
+        let ctx = build_test_context(store.clone(), sender, resolver);
+        let (event, opts) = make_individual_test_data("fail@example.com");
+        let recipient = &opts.recipients[0];
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        let outcome = process_recipient(
+            &ctx,
+            &event,
+            &opts,
+            recipient,
+            &[],
+            &empty_cc_bcc,
+            &shutdown,
+        )
+        .await;
+
+        // Send failure returns Failed; row stays PENDING (execute_send doesn't
+        // call mark_failed — the delivery layer handles that).
+        assert!(
+            matches!(&outcome, RecipientOutcome::Failed(_)),
+            "expected Failed, got {outcome:?}"
+        );
+        let (status, _) = store.status_of(event.event_id, "fail@example.com").unwrap();
+        assert_eq!(status, "PENDING");
+    }
+
+    #[tokio::test]
+    async fn process_recipient_send_permanent_failure() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+        let sender = Arc::new(mock_sender(vec![Err(AppError::permanent_mailer(
+            "bad address",
+        ))]));
+
+        let ctx = build_test_context(store.clone(), sender, resolver);
+        let (event, opts) = make_individual_test_data("perm@example.com");
+        let recipient = &opts.recipients[0];
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        let outcome = process_recipient(
+            &ctx,
+            &event,
+            &opts,
+            recipient,
+            &[],
+            &empty_cc_bcc,
+            &shutdown,
+        )
+        .await;
+
+        assert!(
+            matches!(&outcome, RecipientOutcome::Failed(_)),
+            "expected Failed, got {outcome:?}"
+        );
+        // Row stays PENDING — execute_send doesn't call mark_failed.
+        let (status, _) = store.status_of(event.event_id, "perm@example.com").unwrap();
+        assert_eq!(status, "PENDING");
+    }
+
+    // ── process_group integration tests ────────────────────────────────────────
+
+    fn make_group_test_data(
+        emails: Vec<&str>,
+        group_retry_mode: common::GroupRetryMode,
+    ) -> (NotificationEvent, common::EmailOptions) {
+        let event = make_group_event(emails.clone(), vec![], vec![]);
+        let mut opts = event.channel_overrides.email.clone().unwrap();
+        opts.group_retry_mode = group_retry_mode;
+        (event, opts)
+    }
+
+    #[tokio::test]
+    async fn process_group_whole_mode_happy_path() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+        let sender = Arc::new(mock_sender(vec![Ok(())]));
+
+        let ctx = build_test_context(store.clone(), sender, resolver);
+        let (event, opts) = make_group_test_data(
+            vec!["a@example.com", "b@example.com"],
+            common::GroupRetryMode::Whole,
+        );
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        let outcome = process_group(&ctx, &event, &opts, &[], &empty_cc_bcc, 50, &shutdown).await;
+
+        assert!(
+            matches!(outcome, RecipientOutcome::Sent),
+            "expected Sent, got {outcome:?}"
+        );
+        // Only primary row in Whole mode
+        let (status, _) = store.status_of(event.event_id, "a@example.com").unwrap();
+        assert_eq!(status, "SENT");
+    }
+
+    #[tokio::test]
+    async fn process_group_individual_mode_happy_path() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+        let sender = Arc::new(mock_sender(vec![Ok(())]));
+
+        let ctx = build_test_context(store.clone(), sender, resolver);
+        let (event, opts) = make_group_test_data(
+            vec!["a@example.com", "b@example.com", "c@example.com"],
+            common::GroupRetryMode::Individual,
+        );
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        let outcome = process_group(&ctx, &event, &opts, &[], &empty_cc_bcc, 50, &shutdown).await;
+
+        assert!(
+            matches!(outcome, RecipientOutcome::Sent),
+            "expected Sent, got {outcome:?}"
+        );
+        // All three recipients should be SENT
+        for email in &["a@example.com", "b@example.com", "c@example.com"] {
+            let (status, _) = store.status_of(event.event_id, email).unwrap();
+            assert_eq!(status, "SENT", "{email} should be SENT");
+        }
+    }
+
+    #[tokio::test]
+    async fn process_group_individual_mode_all_secondaries_already_sent() {
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+        let sender = Arc::new(mock_sender(vec![Ok(())]));
+
+        let ctx = build_test_context(store.clone(), sender, resolver);
+        let (event, opts) = make_group_test_data(
+            vec!["a@example.com", "b@example.com", "c@example.com"],
+            common::GroupRetryMode::Individual,
+        );
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        // Pre-populate: primary not yet sent, secondaries already SENT
+        store
+            .mark_sent(event.event_id, "b@example.com")
+            .await
+            .unwrap();
+        store
+            .mark_sent(event.event_id, "c@example.com")
+            .await
+            .unwrap();
+
+        let outcome = process_group(&ctx, &event, &opts, &[], &empty_cc_bcc, 50, &shutdown).await;
+
+        assert!(
+            matches!(outcome, RecipientOutcome::Sent),
+            "expected Sent, got {outcome:?}"
+        );
+        // Primary should be SENT now
+        let (status, _) = store.status_of(event.event_id, "a@example.com").unwrap();
+        assert_eq!(status, "SENT");
+        // Secondaries should remain SENT from earlier
+        let (status_b, _) = store.status_of(event.event_id, "b@example.com").unwrap();
+        assert_eq!(status_b, "SENT");
+    }
+
+    #[tokio::test]
+    async fn process_group_all_recipients_blocked() {
+        use rate_limiter::{MailRateLimiter, RateLimitConfig};
+        use recipient_filter::{FilterConfig, RecipientFilter};
+
+        let store = Arc::new(MockNotificationStore::new());
+        let resolver = Arc::new(MockTemplateResolver::new());
+        resolver.register("ORDER_CONFIRMATION", "Subject", "<b>Hi</b>", "Hi");
+
+        let ctx = crate::ProcessorContext {
+            store: store.clone(),
+            template_store: resolver,
+            sender: Arc::new(mock_sender(vec![])),
+            sender_registry: mailer::SenderRegistry::new(),
+            filter: RecipientFilter::new(FilterConfig {
+                blocked_emails: vec!["x@blocked.com".into(), "y@blocked.com".into()],
+                ..Default::default()
+            }),
+            block_list_store: Arc::new(MockBlockListChecker::new()),
+            rate_limiter: MailRateLimiter::new(RateLimitConfig {
+                emails_per_second: 0,
+                burst_size: 0,
+            }),
+        };
+
+        let (event, opts) = make_group_test_data(
+            vec!["x@blocked.com", "y@blocked.com"],
+            common::GroupRetryMode::Individual,
+        );
+        let shutdown = CancellationToken::new();
+        let empty_cc_bcc = EffectiveCcBcc {
+            cc: vec![],
+            bcc: vec![],
+        };
+
+        let outcome = process_group(&ctx, &event, &opts, &[], &empty_cc_bcc, 50, &shutdown).await;
+
+        assert!(
+            matches!(&outcome, RecipientOutcome::Blocked(_)),
+            "expected Blocked, got {outcome:?}"
+        );
+        // Both rows should be marked BLOCKED
+        let (status_x, _) = store.status_of(event.event_id, "x@blocked.com").unwrap();
+        assert_eq!(status_x, "BLOCKED");
+        let (status_y, _) = store.status_of(event.event_id, "y@blocked.com").unwrap();
+        assert_eq!(status_y, "BLOCKED");
     }
 }
