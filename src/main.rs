@@ -363,11 +363,9 @@ async fn main() -> anyhow::Result<()> {
             let mcp_service = StreamableHttpService::new(
                 move || Ok(mcp_server.clone()),
                 Arc::new(LocalSessionManager::default()),
-                StreamableHttpServerConfig {
-                    stateful_mode: true,
-                    sse_keep_alive: Some(std::time::Duration::from_secs(15)),
-                    ..Default::default()
-                },
+                StreamableHttpServerConfig::default()
+                    .with_stateful_mode(true)
+                    .with_sse_keep_alive(Some(std::time::Duration::from_secs(15))),
             );
 
             let mut mcp_router = axum::Router::new()

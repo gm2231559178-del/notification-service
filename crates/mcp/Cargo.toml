@@ -11,7 +11,7 @@ path = "src/main.rs"
 common  = { path = "../common" }
 store   = { path = "../store" }
 
-rmcp = { version = "0.16", features = ["server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "2", features = ["server", "transport-io", "transport-streamable-http-server"] }
 
 tokio        = { workspace = true }
 anyhow       = { workspace = true }

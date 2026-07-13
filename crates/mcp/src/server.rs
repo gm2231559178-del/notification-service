@@ -174,7 +174,7 @@ impl NotifyServer {
             "message": format!("Email event {} published to {}", event.event_id, self.cfg.amqp.routing_key),
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -195,7 +195,7 @@ impl NotifyServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None::<serde_json::Value>))?;
 
         if rows.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "No delivery records found for event {}",
                 args.event_id
             ))]));
@@ -214,7 +214,7 @@ impl NotifyServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "event_id": args.event_id,
                 "recipients": result,
@@ -243,7 +243,7 @@ impl NotifyServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -262,7 +262,7 @@ impl NotifyServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None::<serde_json::Value>))?;
 
         if templates.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
+            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "No template found for event type '{}'",
                 args.event_type
             ))]));
@@ -284,7 +284,7 @@ impl NotifyServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -322,7 +322,7 @@ impl NotifyServer {
             "inserted": inserted,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -344,7 +344,7 @@ impl NotifyServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None::<serde_json::Value>))?;
 
         match row {
-            None => Ok(CallToolResult::success(vec![Content::text(format!(
+            None => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "No delivery record found for event {} / recipient {}",
                 args.event_id, args.email
             ))])),
@@ -357,7 +357,7 @@ impl NotifyServer {
                     "last_error": r.last_error,
                     "updated_at": r.updated_at.to_rfc3339(),
                 });
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&result).unwrap_or_default(),
                 )]))
             }
@@ -385,7 +385,7 @@ impl NotifyServer {
             })
             .collect();
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -428,7 +428,7 @@ impl NotifyServer {
             "created_at": entry.created_at.to_rfc3339(),
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -443,7 +443,7 @@ impl NotifyServer {
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None::<serde_json::Value>))?;
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Blocklist entry {} removed",
             args.id
         ))]))
@@ -459,7 +459,7 @@ impl NotifyServer {
             "service": "anvil-notify",
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -487,7 +487,7 @@ impl NotifyServer {
             "amqp_routing_key": self.cfg.amqp.routing_key,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&result).unwrap_or_default(),
         )]))
     }
@@ -495,21 +495,16 @@ impl NotifyServer {
 
 impl ServerHandler for NotifyServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(
                 "AnvilNotify MCP Server. Provides email sending, delivery status checks, \
                 template management, blocklist management, and health checks for the anvil-notify \
                 transactional email service. Use send_email to publish an email event via RabbitMQ, \
                 check_delivery_status to query delivery results, list_templates to see available \
-                notification templates, and list_blocklist to view block/allow-list entries."
-                    .to_string(),
-            ),
-        }
+                notification templates, and list_blocklist to view block/allow-list entries.",
+            )
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
